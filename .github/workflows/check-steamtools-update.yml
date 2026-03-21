@@ -16,7 +16,7 @@ jobs:
     
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download from SteamTools CDN
         id: download
@@ -83,7 +83,7 @@ jobs:
 
       - name: Create issue on change
         if: steps.compare.outputs.changed == 'true'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const title = 'SteamTools Update Detected';
