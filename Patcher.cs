@@ -9,6 +9,13 @@ namespace CloudFix
 {
     internal class Patcher
     {
+        class FallbackResolveResult
+        {
+            public PatchEntry[] Patches;
+            public byte[] DynamicCodeCave;
+            public int CodeCaveFileOffset;
+        }
+
         static readonly string[] HijackCandidates = { "xinput1_4.dll", "dwmapi.dll" };
 
         static readonly byte[] AesKey =
@@ -525,21 +532,22 @@ namespace CloudFix
             if (payload == null)
                 return PatchState.UnknownVersion;
 
-            var resolved = ResolveFallbackPatchOffsets(payload);
-            if (resolved == null)
+            var result = ResolveFallbackPatchOffsets(payload);
+            if (result == null)
                 return PatchState.UnknownVersion;
 
-            var (_, applied, skipped, errors) = CheckPatches(payload, resolved);
+            var (_, applied, skipped, errors) = CheckPatches(payload, result.Patches);
 
             if (errors.Count > 0)
                 return PatchState.UnknownVersion;
 
-            bool caveWritten = CodeCaveFileOffset + CodeCaveContent.Length <= payload.Length
-                && BytesMatch(payload, CodeCaveFileOffset, CodeCaveContent, 0, CodeCaveContent.Length);
+            bool caveWritten = result.CodeCaveFileOffset + result.DynamicCodeCave.Length <= payload.Length
+                && BytesMatch(payload, result.CodeCaveFileOffset,
+                    result.DynamicCodeCave, 0, result.DynamicCodeCave.Length);
 
-            if (applied == 0 && skipped == resolved.Length)
+            if (applied == 0 && skipped == result.Patches.Length)
                 return caveWritten ? PatchState.Patched : PatchState.OutOfDate;
-            if (skipped == 0 && applied == resolved.Length)
+            if (skipped == 0 && applied == result.Patches.Length)
                 return PatchState.Unpatched;
 
             return PatchState.PartiallyPatched;
@@ -572,18 +580,18 @@ namespace CloudFix
                 if (resolved == null)
                     return result.Fail("Could not locate fallback patch sites in payload");
 
-                var (patchedPayload, plApplied, plSkipped, plErrors) = ApplyPatches(payload, resolved);
+                var (patchedPayload, plApplied, plSkipped, plErrors) = ApplyPatches(payload, resolved.Patches);
                 if (plErrors.Count > 0)
                 {
                     foreach (var err in plErrors) Log(err);
                     return result.Fail("Byte mismatch at fallback patch sites");
                 }
 
-                if (CodeCaveFileOffset + CodeCaveContent.Length > patchedPayload.Length)
+                if (resolved.CodeCaveFileOffset + resolved.DynamicCodeCave.Length > patchedPayload.Length)
                     return result.Fail("Payload too small for code cave injection");
 
-                bool caveAlready = BytesMatch(patchedPayload, CodeCaveFileOffset,
-                    CodeCaveContent, 0, CodeCaveContent.Length);
+                bool caveAlready = BytesMatch(patchedPayload, resolved.CodeCaveFileOffset,
+                    resolved.DynamicCodeCave, 0, resolved.DynamicCodeCave.Length);
 
                 var stellaErr = DeployStella(apiKey);
                 if (stellaErr != null)
@@ -591,7 +599,8 @@ namespace CloudFix
 
                 if (plApplied > 0 || !caveAlready)
                 {
-                    Buffer.BlockCopy(CodeCaveContent, 0, patchedPayload, CodeCaveFileOffset, CodeCaveContent.Length);
+                    Buffer.BlockCopy(resolved.DynamicCodeCave, 0, patchedPayload,
+                        resolved.CodeCaveFileOffset, resolved.DynamicCodeCave.Length);
                     ReEncryptAndWrite(cachePath, patchedPayload, iv);
                     int total = plApplied + (caveAlready ? 0 : 1);
                     Log($"  {total} change(s) applied" + (plSkipped > 0 ? $", {plSkipped} already done" : ""));
@@ -779,6 +788,139 @@ namespace CloudFix
             File.WriteAllBytes(cachePath, output);
         }
 
+        static string ReadAsciiZ(byte[] data, int offset)
+        {
+            int end = offset;
+            while (end < data.Length && data[end] != 0) end++;
+            if (end == offset) return string.Empty;
+            return System.Text.Encoding.ASCII.GetString(data, offset, end - offset);
+        }
+
+        // find LoadLibraryA and GetProcAddress IAT entry RVAs from the PE import directory
+        static (int loadLibA, int getProcAddr) FindKernel32IatEntries(byte[] pe, PeSection[] sections)
+        {
+            if (pe.Length < 64) return (-1, -1);
+
+            int peOff = BitConverter.ToInt32(pe, 0x3C);
+            if (peOff < 0 || peOff + 24 > pe.Length) return (-1, -1);
+
+            int magic = BitConverter.ToUInt16(pe, peOff + 24);
+            int importDirOffset;
+            if (magic == 0x20B) // PE32+
+                importDirOffset = peOff + 24 + 120; // DataDirectory[1] = Import Table
+            else if (magic == 0x10B) // PE32
+                importDirOffset = peOff + 24 + 104; // DataDirectory[1] = Import Table
+            else
+                return (-1, -1);
+
+            if (importDirOffset + 8 > pe.Length) return (-1, -1);
+
+            int importRva = BitConverter.ToInt32(pe, importDirOffset);
+            int importSize = BitConverter.ToInt32(pe, importDirOffset + 4);
+            if (importRva == 0 || importSize == 0) return (-1, -1);
+
+            int importFileOff = PeSection.RvaToFileOffset(sections, importRva);
+            if (importFileOff < 0) return (-1, -1);
+
+            int loadLibA = -1, getProcAddr = -1;
+
+            // walk import descriptors (20 bytes each)
+            for (int desc = importFileOff; desc + 20 <= pe.Length; desc += 20)
+            {
+                int nameRva = BitConverter.ToInt32(pe, desc + 12);
+                if (nameRva == 0) break; // null terminator
+
+                int nameOff = PeSection.RvaToFileOffset(sections, nameRva);
+                if (nameOff < 0 || nameOff >= pe.Length) continue;
+
+                string dllName = ReadAsciiZ(pe, nameOff);
+                if (!dllName.Equals("KERNEL32.dll", StringComparison.OrdinalIgnoreCase) &&
+                    !dllName.Equals("kernel32.dll", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                int oftRva = BitConverter.ToInt32(pe, desc);
+                int ftRva = BitConverter.ToInt32(pe, desc + 16);
+
+                if (oftRva == 0) oftRva = ftRva; // some linkers omit OFT
+
+                int oftOff = PeSection.RvaToFileOffset(sections, oftRva);
+                int ftOff = PeSection.RvaToFileOffset(sections, ftRva);
+                if (oftOff < 0 || ftOff < 0) continue;
+
+                int thunkSize = (magic == 0x20B) ? 8 : 4;
+
+                for (int ti = 0; ; ti++)
+                {
+                    int intEntryOff = oftOff + ti * thunkSize;
+                    int iatEntryOff = ftOff + ti * thunkSize;
+
+                    if (intEntryOff + thunkSize > pe.Length || iatEntryOff + thunkSize > pe.Length) break;
+
+                    long thunkVal;
+                    if (thunkSize == 8)
+                        thunkVal = BitConverter.ToInt64(pe, intEntryOff);
+                    else
+                        thunkVal = BitConverter.ToUInt32(pe, intEntryOff);
+
+                    if (thunkVal == 0) break; // end of thunk array
+
+                    // ordinal import, skip
+                    bool isOrdinal = (thunkSize == 8)
+                        ? (thunkVal & unchecked((long)0x8000000000000000)) != 0
+                        : (thunkVal & 0x80000000) != 0;
+
+                    if (isOrdinal) continue;
+
+                    // IMAGE_IMPORT_BY_NAME: skip 2-byte hint to get the function name
+                    int hintNameRva = (int)(thunkVal & 0x7FFFFFFF);
+                    int hintNameOff = PeSection.RvaToFileOffset(sections, hintNameRva);
+                    if (hintNameOff < 0 || hintNameOff + 2 >= pe.Length) continue;
+
+                    string funcName = ReadAsciiZ(pe, hintNameOff + 2);
+
+                    int iatEntryRva = ftRva + ti * thunkSize;
+
+                    if (funcName == "LoadLibraryA")
+                        loadLibA = iatEntryRva;
+                    else if (funcName == "GetProcAddress")
+                        getProcAddr = iatEntryRva;
+
+                    if (loadLibA >= 0 && getProcAddr >= 0)
+                        return (loadLibA, getProcAddr);
+                }
+
+                break; // only process KERNEL32
+            }
+
+            return (loadLibA, getProcAddr);
+        }
+
+        // Build the code cave with correct relative offsets for this payload build
+        static byte[] BuildDynamicCodeCave(int caveRva, int p10Rva, byte origP10Byte4,
+            int loadLibAIatRva, int getProcAddrIatRva)
+        {
+            // layout: [0x00-0x17] reg storage, [0x18-0x36] prologue capture, [0x37-0xB8] fallback stub
+            // 3 external displacements need patching: jump-back, LoadLibraryA, GetProcAddress
+            var cave = (byte[])CodeCaveContent.Clone();
+
+            // stack offset byte may differ between builds
+            cave[0x31] = origP10Byte4;
+
+            // jump-back to p10+5
+            int jumpBackDisp = (p10Rva + 5) - (caveRva + 0x37);
+            BitConverter.TryWriteBytes(cave.AsSpan(0x33, 4), jumpBackDisp);
+
+            // LoadLibraryA IAT ref
+            int loadLibDisp = loadLibAIatRva - (caveRva + 0x58);
+            BitConverter.TryWriteBytes(cave.AsSpan(0x54, 4), loadLibDisp);
+
+            // GetProcAddress IAT ref
+            int getProcDisp = getProcAddrIatRva - (caveRva + 0x70);
+            BitConverter.TryWriteBytes(cave.AsSpan(0x6C, 4), getProcDisp);
+
+            return cave;
+        }
+
         static bool BytesMatch(byte[] data, int dataOffset, byte[] pattern, int patOffset, int length)
         {
             if (dataOffset + length > data.Length) return false;
@@ -919,10 +1061,11 @@ namespace CloudFix
             };
         }
 
-        bool ResolvePayloadSections(byte[] payload, out int tStart, out int tEnd, out int gStart, out int gEnd)
+        bool ResolvePayloadSections(byte[] payload, out PeSection[] sections,
+            out int tStart, out int tEnd, out int gStart, out int gEnd)
         {
             tStart = tEnd = gStart = gEnd = 0;
-            var sections = PeSection.Parse(payload);
+            sections = PeSection.Parse(payload);
             var textSec = PeSection.Find(sections, ".text");
 
             // obfuscated section has a random name each build - find by excluding standard ones
@@ -952,7 +1095,7 @@ namespace CloudFix
 
         PatchEntry[] ResolvePayloadPatchOffsets(byte[] payload)
         {
-            if (!ResolvePayloadSections(payload, out int tStart, out int tEnd, out int gStart, out int gEnd))
+            if (!ResolvePayloadSections(payload, out _, out int tStart, out int tEnd, out int gStart, out int gEnd))
                 return null;
 
             int p1 = TryHardcodedOrScan(payload, PayloadPatches[0].Offset,
@@ -993,7 +1136,7 @@ namespace CloudFix
 
         PatchEntry[] ResolveSetupPatchOffsets(byte[] payload)
         {
-            if (!ResolvePayloadSections(payload, out int tStart, out int tEnd, out int gStart, out int gEnd))
+            if (!ResolvePayloadSections(payload, out _, out int tStart, out int tEnd, out int gStart, out int gEnd))
                 return null;
 
             int p4 = TryHardcodedOrScan(payload, PayloadPatches[3].Offset,
@@ -1022,9 +1165,9 @@ namespace CloudFix
             };
         }
 
-        PatchEntry[] ResolveFallbackPatchOffsets(byte[] payload)
+        FallbackResolveResult ResolveFallbackPatchOffsets(byte[] payload)
         {
-            if (!ResolvePayloadSections(payload, out int tStart, out int tEnd, out _, out _))
+            if (!ResolvePayloadSections(payload, out var sections, out int tStart, out int tEnd, out _, out _))
                 return null;
 
             int p10 = TryHardcodedOrScan(payload, FallbackPatches[0].Offset,
@@ -1048,7 +1191,7 @@ namespace CloudFix
 
             int p7 = TryHardcodedOrScan(payload, FallbackPatches[2].Offset,
                 FallbackPatches[2].Original, FallbackPatches[2].Replacement,
-                () => Signatures.FindPayloadPatch7(payload, tStart, tEnd));
+                () => Signatures.FindPayloadPatch7(payload, tStart, tEnd, sections));
             if (p7 < 0)
             {
                 Log("  Payload: could not locate hook call site");
@@ -1064,13 +1207,107 @@ namespace CloudFix
                 return null;
             }
 
-            Log($"  Fallback patches at 0x{p10:X}, 0x{pJnz:X}, 0x{p7:X}, 0x{p8:X}");
-            return new PatchEntry[]
+            // convert file offsets to RVAs for displacement calculations
+            int p10Rva = PeSection.FileOffsetToRva(sections, p10);
+            int p7Rva = PeSection.FileOffsetToRva(sections, p7);
+            int caveFileOffset = CodeCaveFileOffset;
+            int caveRva = PeSection.FileOffsetToRva(sections, caveFileOffset);
+
+            if (p10Rva < 0 || p7Rva < 0 || caveRva < 0)
             {
-                SnapshotPatch(payload, p10, FallbackPatches[0]),
-                SnapshotPatch(payload, pJnz, FallbackPatches[1]),
-                SnapshotPatch(payload, p7, FallbackPatches[2]),
-                SnapshotPatch(payload, p8, FallbackPatches[3]),
+                Log($"  Payload: RVA resolution failed (p10Rva={p10Rva:X}, p7Rva={p7Rva:X}, caveRva={caveRva:X})");
+                return null;
+            }
+
+            // Validate code cave falls within a mapped section
+            var caveSec = PeSection.FindByFileOffset(sections, caveFileOffset);
+            if (caveSec == null)
+            {
+                Log($"  Payload: code cave file offset 0x{caveFileOffset:X} not within any PE section");
+                return null;
+            }
+            if (caveFileOffset + CodeCaveContent.Length > caveSec.Value.RawOffset + caveSec.Value.RawSize)
+            {
+                Log($"  Payload: code cave extends beyond section '{caveSec.Value.Name}'");
+                return null;
+            }
+
+            // Find IAT entries dynamically
+            var (loadLibIatRva, getProcIatRva) = FindKernel32IatEntries(payload, sections);
+            if (loadLibIatRva < 0 || getProcIatRva < 0)
+            {
+                Log($"  Payload: could not find KERNEL32 IAT entries (LoadLibraryA={loadLibIatRva:X}, GetProcAddress={getProcIatRva:X})");
+                return null;
+            }
+
+            Log($"  IAT: LoadLibraryA=0x{loadLibIatRva:X}, GetProcAddress=0x{getProcIatRva:X}");
+
+            // snapshot P10 original bytes (5th byte is stack offset, varies between builds)
+            bool p10IsUnpatched = payload[p10] == 0x48 && payload[p10 + 1] == 0x89 &&
+                                  payload[p10 + 2] == 0x74 && payload[p10 + 3] == 0x24;
+            byte origP10Byte4 = p10IsUnpatched ? payload[p10 + 4] : FallbackPatches[0].Original[4];
+
+            var p10Orig = new byte[5];
+            if (p10IsUnpatched)
+            {
+                Buffer.BlockCopy(payload, p10, p10Orig, 0, 5);
+            }
+            else
+            {
+                // Already patched — use template original with snapshotted 5th byte
+                Buffer.BlockCopy(FallbackPatches[0].Original, 0, p10Orig, 0, 5);
+                p10Orig[4] = origP10Byte4;
+            }
+
+            // P10: JMP to prologue_capture at cave+0x18
+            int p10JmpTarget = caveRva + 0x18;
+            int p10Disp = p10JmpTarget - (p10Rva + 5);
+            var p10Repl = new byte[5];
+            p10Repl[0] = 0xE9;
+            BitConverter.TryWriteBytes(p10Repl.AsSpan(1, 4), p10Disp);
+
+            // snapshot P7 original bytes, checking if already redirected to cave
+            var p7Orig = new byte[5];
+            if (payload[p7] == 0xE8)
+            {
+                // check if CALL targets original function or code cave
+                int p7OrigRel = BitConverter.ToInt32(payload, p7 + 1);
+                int p7OrigTarget = p7Rva + 5 + p7OrigRel;
+                if (p7OrigTarget >= 0x41000 && p7OrigTarget <= 0x44000)
+                    Buffer.BlockCopy(payload, p7, p7Orig, 0, 5);
+                else
+                    Buffer.BlockCopy(FallbackPatches[2].Original, 0, p7Orig, 0, 5);
+            }
+            else
+            {
+                Buffer.BlockCopy(FallbackPatches[2].Original, 0, p7Orig, 0, 5);
+            }
+
+            // P7: CALL to fallback_stub at cave+0x37
+            int p7CallTarget = caveRva + 0x37; // fallback_stub entry point within cave
+            int p7Disp = p7CallTarget - (p7Rva + 5);
+            var p7Repl = new byte[5];
+            p7Repl[0] = 0xE8;
+            BitConverter.TryWriteBytes(p7Repl.AsSpan(1, 4), p7Disp);
+
+            // Build dynamic code cave
+            var dynamicCave = BuildDynamicCodeCave(caveRva, p10Rva, origP10Byte4,
+                loadLibIatRva, getProcIatRva);
+
+            Log($"  Fallback patches at 0x{p10:X}, 0x{pJnz:X}, 0x{p7:X}, 0x{p8:X}");
+            Log($"  Code cave at file=0x{caveFileOffset:X} rva=0x{caveRva:X}");
+
+            return new FallbackResolveResult
+            {
+                Patches = new PatchEntry[]
+                {
+                    new PatchEntry(p10, p10Orig, p10Repl),
+                    SnapshotPatch(payload, pJnz, FallbackPatches[1]),
+                    new PatchEntry(p7, p7Orig, p7Repl),
+                    SnapshotPatch(payload, p8, FallbackPatches[3]),
+                },
+                DynamicCodeCave = dynamicCave,
+                CodeCaveFileOffset = caveFileOffset,
             };
         }
     }

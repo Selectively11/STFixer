@@ -2,7 +2,11 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Reflection;
+using System.Text.Json;
+using System.Threading.Tasks;
 using Microsoft.Win32;
 
 namespace CloudFix
@@ -103,7 +107,8 @@ namespace CloudFix
                 Console.WriteLine("  2. Enable  (patch cloud saves)");
                 Console.WriteLine("  3. Disable (restore originals)");
                 Console.WriteLine("  4. Enable Morrenus fallback");
-                Console.WriteLine("  5. Exit");
+                Console.WriteLine("  5. Test Morrenus API");
+                Console.WriteLine("  6. Exit");
                 Console.WriteLine();
                 Console.Write("  > ");
 
@@ -124,7 +129,8 @@ namespace CloudFix
                         if (setupResult.Succeeded)
                         {
                             PrintGreen("Offline setup: done");
-                            OfferSteamRestart();
+                            if (!OfferSteamRestart())
+                                WaitForKey();
                         }
                         else
                         {
@@ -144,7 +150,8 @@ namespace CloudFix
                         if (applyResult.Succeeded)
                         {
                             PrintGreen("Cloud Fix: enabled");
-                            OfferSteamRestart();
+                            if (!OfferSteamRestart())
+                                WaitForKey();
                         }
                         else
                         {
@@ -164,7 +171,8 @@ namespace CloudFix
                         if (restoreResult.Succeeded)
                         {
                             PrintRed("Cloud Fix: disabled");
-                            OfferSteamRestart();
+                            if (!OfferSteamRestart())
+                                WaitForKey();
                         }
                         else
                         {
@@ -183,6 +191,15 @@ namespace CloudFix
                         break;
 
                     case '5':
+                        ClearScreen();
+                        PrintHeader();
+                        PrintLine($"Steam: {_steamPath}");
+                        PrintSep();
+                        Console.WriteLine();
+                        RunApiTest();
+                        break;
+
+                    case '6':
                         return;
                 }
             }
@@ -280,6 +297,154 @@ namespace CloudFix
                 PrintRed($"Error: {result.Error}");
                 WaitForKey();
             }
+        }
+
+        static void RunApiTest()
+        {
+            var cfgPath = Path.Combine(_steamPath, "stella.cfg");
+            if (!File.Exists(cfgPath))
+            {
+                PrintRed("stella.cfg not found in Steam directory.");
+                PrintLine("Run 'Enable Morrenus fallback' first to set up your API key.");
+                WaitForKey();
+                return;
+            }
+
+            string apiKey;
+            try { apiKey = File.ReadAllText(cfgPath).Trim(); }
+            catch (IOException ex)
+            {
+                PrintRed($"Could not read stella.cfg: {ex.Message}");
+                WaitForKey();
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(apiKey))
+            {
+                PrintRed("stella.cfg is empty.");
+                WaitForKey();
+                return;
+            }
+
+            PrintLine("API key loaded from stella.cfg");
+            Console.WriteLine();
+
+            ulong depotId, manifestId;
+
+            Console.WriteLine("  1. Test with Grind Survivors");
+            Console.WriteLine("  2. Specify depot + manifest ID");
+            Console.WriteLine();
+            Console.Write("  > ");
+            var testChoice = Console.ReadKey(true);
+            Console.WriteLine(testChoice.KeyChar);
+            Console.WriteLine();
+
+            if (testChoice.KeyChar == '1')
+            {
+                depotId = 3816931;
+                manifestId = 3636809188681531478;
+                PrintLine($"Depot: {depotId}  Manifest: {manifestId}");
+            }
+            else
+            {
+                Console.Write("  Depot ID: ");
+                var depotStr = Console.ReadLine()?.Trim();
+                if (!ulong.TryParse(depotStr, out depotId) || depotId == 0)
+                {
+                    PrintRed("Invalid depot ID.");
+                    WaitForKey();
+                    return;
+                }
+
+                Console.Write("  Manifest ID: ");
+                var manifestStr = Console.ReadLine()?.Trim();
+                if (!ulong.TryParse(manifestStr, out manifestId) || manifestId == 0)
+                {
+                    PrintRed("Invalid manifest ID.");
+                    WaitForKey();
+                    return;
+                }
+            }
+
+            Console.WriteLine();
+
+            try
+            {
+                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+                http.DefaultRequestHeaders.UserAgent.ParseAdd("Stella/1.0");
+
+                PrintLine("Requesting code from manifest.morrenus.xyz..");
+
+                var apiUrl = $"https://manifest.morrenus.xyz/api/v1/generate/requestcode" +
+                             $"?depot_id={depotId}&manifest_id={manifestId}";
+                var apiReq = new HttpRequestMessage(HttpMethod.Get, apiUrl);
+                apiReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+
+                var apiResp = http.SendAsync(apiReq).GetAwaiter().GetResult();
+                var apiBody = apiResp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+
+                PrintLine($"API: HTTP {(int)apiResp.StatusCode} {apiResp.ReasonPhrase}");
+
+                if (!string.IsNullOrEmpty(apiBody))
+                    PrintLine($"Response: {apiBody}");
+
+                if (!apiResp.IsSuccessStatusCode)
+                {
+                    Console.WriteLine();
+                    PrintRed("API request failed");
+                    WaitForKey();
+                    return;
+                }
+
+                ulong requestCode = 0;
+                try
+                {
+                    using var doc = JsonDocument.Parse(apiBody);
+                    if (doc.RootElement.TryGetProperty("request_code", out var rc))
+                    {
+                        if (rc.ValueKind == JsonValueKind.Number)
+                            requestCode = rc.GetUInt64();
+                        else if (rc.ValueKind == JsonValueKind.String)
+                            ulong.TryParse(rc.GetString(), out requestCode);
+                    }
+                }
+                catch (JsonException)
+                {
+                    Console.WriteLine();
+                    PrintRed("Response is not valid JSON");
+                    WaitForKey();
+                    return;
+                }
+
+                if (requestCode == 0)
+                {
+                    Console.WriteLine();
+                    PrintRed("request_code is 0 or missing (depot/manifest may not exist)");
+                    WaitForKey();
+                    return;
+                }
+
+                PrintGreen($"request_code: {requestCode}");
+                Console.WriteLine();
+                PrintGreen("API connection is working");
+            }
+            catch (HttpRequestException ex)
+            {
+                Console.WriteLine();
+                PrintRed($"Connection failed: {ex.Message}");
+            }
+            catch (AggregateException ex) when (ex.InnerException is TaskCanceledException)
+            {
+                Console.WriteLine();
+                PrintRed("Request timed out");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine();
+                PrintRed($"Error: {ex.Message}");
+            }
+
+            WaitForKey();
         }
 
         static string DetectSteamPath()

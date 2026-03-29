@@ -155,9 +155,7 @@ namespace CloudFix
             return -1;
         }
 
-        // Activation flag: two mov cs:byte_xxx, imm8 instructions (C6 05 xx xx FE FF 01/00)
-        // separated by E9 00 00 00 00 E9 ?? ?? 00 00 bridge, both targeting same global.
-        // Returns offset of the second instruction (the fail path that sets 0).
+        // activation flag: paired C6 05 xx xx FE FF 01/00 instructions with E9 bridge between them
         public static int FindPayloadPatch4(byte[] data, int gStart, int gEnd)
         {
             for (int i = gStart; i < gEnd - 24; i++)
@@ -183,9 +181,7 @@ namespace CloudFix
             return -1;
         }
 
-        // GetCookie retry skip: 48 85 F6 (test rsi,rsi) followed by 75/EB xx (jnz/jmp short)
-        // preceded by a call (E8 xx xx xx xx) to the cookie cleanup func.
-        // Returns offset of the 75/EB byte.
+        // GetCookie retry skip: E8 call followed by 48 85 F6 / 75 with a backwards jmp in the skip range
         public static int FindPayloadPatch5(byte[] data, int tStart, int tEnd)
         {
             for (int i = tStart; i < tEnd - 12; i++)
@@ -239,12 +235,32 @@ namespace CloudFix
         // P7: call to sub_180042B60 (or redirected to code cave)
         public static int FindPayloadPatch7(byte[] data, int tStart, int tEnd)
         {
+            return FindPayloadPatch7(data, tStart, tEnd, null);
+        }
+
+        // P7 with section-aware RVA calculation for accurate CALL target resolution
+        public static int FindPayloadPatch7(byte[] data, int tStart, int tEnd, PeSection[] sections)
+        {
             for (int i = tStart; i < tEnd - 10; i++)
             {
                 if (data[i] != 0xE8) continue;
 
                 int rel = BitConverter.ToInt32(data, i + 1);
-                int target = i + 5 + rel;
+                int target;
+
+                if (sections != null)
+                {
+                    // Accurate: convert file offset to RVA, apply displacement, check target RVA
+                    int instrRva = PeSection.FileOffsetToRva(sections, i);
+                    if (instrRva < 0) continue;
+                    int targetRva = instrRva + 5 + rel;
+                    target = targetRva; // compare against RVA ranges
+                }
+                else
+                {
+                    // Legacy: approximate using file offsets (only works if VA ≈ file offset)
+                    target = i + 5 + rel;
+                }
 
                 if ((target >= 0x41000 && target <= 0x44000) ||
                     (target >= 0x175000 && target <= 0x176000))

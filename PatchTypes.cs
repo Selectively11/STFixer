@@ -84,5 +84,61 @@ namespace CloudFix
                 if (sections[i].Name == name) return sections[i];
             return null;
         }
+
+        // file offset -> RVA, returns -1 if outside any section
+        public static int FileOffsetToRva(PeSection[] sections, int fileOffset)
+        {
+            for (int i = 0; i < sections.Length; i++)
+            {
+                var s = sections[i];
+                if (fileOffset >= s.RawOffset && fileOffset < s.RawOffset + s.RawSize)
+                    return s.VirtualAddress + (fileOffset - s.RawOffset);
+            }
+            return -1;
+        }
+
+        // RVA -> file offset, returns -1 if in BSS or outside any section
+        public static int RvaToFileOffset(PeSection[] sections, int rva)
+        {
+            for (int i = 0; i < sections.Length; i++)
+            {
+                var s = sections[i];
+                int size = Math.Max(s.VirtualSize, s.RawSize);
+                if (rva >= s.VirtualAddress && rva < s.VirtualAddress + size)
+                {
+                    int offsetInSection = rva - s.VirtualAddress;
+                    if (offsetInSection >= s.RawSize)
+                        return -1; // in BSS / zero-fill region, no file backing
+                    return s.RawOffset + offsetInSection;
+                }
+            }
+            return -1;
+        }
+
+        public static PeSection? FindByFileOffset(PeSection[] sections, int fileOffset)
+        {
+            for (int i = 0; i < sections.Length; i++)
+            {
+                var s = sections[i];
+                if (fileOffset >= s.RawOffset && fileOffset < s.RawOffset + s.RawSize)
+                    return s;
+            }
+            return null;
+        }
+
+        public static long GetImageBase(byte[] pe)
+        {
+            if (pe.Length < 64) return 0;
+            int peOff = BitConverter.ToInt32(pe, 0x3C);
+            if (peOff < 0 || peOff + 24 > pe.Length) return 0;
+            if (pe[peOff] != 'P' || pe[peOff + 1] != 'E') return 0;
+
+            int magic = BitConverter.ToUInt16(pe, peOff + 24);
+            if (magic == 0x20B) // PE32+
+                return BitConverter.ToInt64(pe, peOff + 24 + 24);
+            if (magic == 0x10B) // PE32
+                return BitConverter.ToInt32(pe, peOff + 24 + 28);
+            return 0;
+        }
     }
 }
