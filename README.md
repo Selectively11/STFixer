@@ -1,8 +1,8 @@
 # CloudFix
 
-A fix for the 'broken Capcom game saves' problem that is caused by SteamTools jank.
+A fix for the 'broken Capcom game saves' problem that is caused by SteamTools jank. Also other stuff!
 
-> **Important: Disable Steam Cloud for affected games in their Steam properties. You don't want a scenario where you disable this tool/you run an official SteamTools update and forget to run this tool again & your game saves are sent to the screenshot App ID, potentially causing data loss but much more likely causing Steam to be deeply confused. Backup your saves for all non-owned games!**
+> **Important: Disable Steam Cloud for affected games in their Steam properties. Manually backup your saves for all non-owned games!**
 
 ## What?
 
