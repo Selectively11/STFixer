@@ -38,7 +38,7 @@ namespace CloudFix
         const string RepoOwner = "Selectively11";
         const string RepoName = "CloudFix";
 
-        static readonly HttpClient _http = new HttpClient();
+        static readonly HttpClient _http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
 
         static Updater()
         {
@@ -66,6 +66,11 @@ namespace CloudFix
                 if (remoteVer <= localVer)
                     return null;
             }
+            else
+            {
+                // can't compare versions reliably, skip update
+                return null;
+            }
 
             return release;
         }
@@ -90,36 +95,41 @@ namespace CloudFix
 
             Program.PrintLine($"Downloading {exeAsset.Name}..");
 
-            var tempPath = Path.GetTempFileName() + ".exe";
-            using (var stream = await _http.GetStreamAsync(exeAsset.DownloadUrl))
-            using (var fs = File.Create(tempPath))
-            {
-                await stream.CopyToAsync(fs);
-            }
-
-            var currentExe = Environment.ProcessPath;
-            var backupPath = currentExe + ".old";
-
-            // swap: rename current -> .old, move new -> current, then relaunch
-            Program.PrintLine("Installing update..");
+            var tempPath = Path.Combine(Path.GetTempPath(), $"CloudFix_{Guid.NewGuid():N}.exe");
             try
             {
-                if (File.Exists(backupPath))
-                    File.Delete(backupPath);
-                File.Move(currentExe, backupPath);
-                File.Move(tempPath, currentExe);
-            }
-            catch (Exception ex)
-            {
-                Program.PrintLine($"Error: could not replace exe - {ex.Message}");
-                // try to undo
-                if (!File.Exists(currentExe) && File.Exists(backupPath))
-                    File.Move(backupPath, currentExe);
-                return;
-            }
+                using (var stream = await _http.GetStreamAsync(exeAsset.DownloadUrl))
+                using (var fs = File.Create(tempPath))
+                {
+                    await stream.CopyToAsync(fs);
+                }
 
-            Program.PrintLine("Updated. Relaunching..");
-            Process.Start(new ProcessStartInfo(currentExe) { UseShellExecute = true });
+                var currentExe = Environment.ProcessPath;
+                var backupPath = currentExe + ".old";
+
+                Program.PrintLine("Installing update..");
+                try
+                {
+                    if (File.Exists(backupPath))
+                        File.Delete(backupPath);
+                    File.Move(currentExe, backupPath);
+                    File.Move(tempPath, currentExe);
+                }
+                catch (Exception ex)
+                {
+                    Program.PrintLine($"Error: could not replace exe - {ex.Message}");
+                    if (!File.Exists(currentExe) && File.Exists(backupPath))
+                        File.Move(backupPath, currentExe);
+                    return;
+                }
+
+                Program.PrintLine("Updated. Relaunching..");
+                Process.Start(new ProcessStartInfo(currentExe) { UseShellExecute = true });
+            }
+            finally
+            {
+                try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
+            }
         }
     }
 }

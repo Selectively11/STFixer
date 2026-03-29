@@ -7,7 +7,7 @@ namespace CloudFix
 {
     internal static class Fingerprint
     {
-        public static string FindCachePath(string steamPath)
+        public static string FindCachePath(string steamPath, bool verbose = true)
         {
             var cacheDir = Path.Combine(steamPath, "appcache", "httpcache", "3b");
             if (!Directory.Exists(cacheDir))
@@ -19,14 +19,14 @@ namespace CloudFix
                 var path = Path.Combine(cacheDir, fp);
                 if (File.Exists(path))
                 {
-                    Program.PrintLine($"Cache: {path}");
+                    if (verbose) Program.PrintLine($"Cache: {path}");
                     return path;
                 }
-                Program.PrintLine($"Fingerprint {fp} computed but no cache file there");
+                if (verbose) Program.PrintLine($"Fingerprint {fp} computed but no cache file there");
             }
             catch (Exception ex)
             {
-                Program.PrintLine($"Fingerprint computation failed ({ex.Message}), scanning..");
+                if (verbose) Program.PrintLine($"Fingerprint computation failed ({ex.Message}), scanning..");
             }
 
             foreach (var f in Directory.GetFiles(cacheDir))
@@ -35,7 +35,7 @@ namespace CloudFix
                 var info = new FileInfo(f);
                 if (name.Length == 16 && info.Length > 500000 && info.Length < 5000000)
                 {
-                    Program.PrintLine($"Cache (found by scan): {f}");
+                    if (verbose) Program.PrintLine($"Cache (found by scan): {f}");
                     return f;
                 }
             }

@@ -162,12 +162,10 @@ namespace CloudFix
         {
             for (int i = gStart; i < gEnd - 24; i++)
             {
-                // success: C6 05 ?? ?? FE FF 01
                 if (data[i] != 0xC6 || data[i + 1] != 0x05) continue;
                 if (data[i + 4] != 0xFE || data[i + 5] != 0xFF) continue;
                 if (data[i + 6] != 0x01) continue;
 
-                // bridge: E9 00 00 00 00 (nop jmp) then E9 ?? ?? 00 00 (skip jmp)
                 int b = i + 7;
                 if (b + 10 + 7 > gEnd) continue;
                 if (data[b] != 0xE9 || data[b + 1] != 0x00 || data[b + 2] != 0x00 ||
@@ -175,7 +173,6 @@ namespace CloudFix
                 if (data[b + 5] != 0xE9) continue;
                 if (data[b + 8] != 0x00 || data[b + 9] != 0x00) continue;
 
-                // fail: C6 05 ?? ?? FE FF [00|01]
                 int failOff = b + 10;
                 if (data[failOff] != 0xC6 || data[failOff + 1] != 0x05) continue;
                 if (data[failOff + 4] != 0xFE || data[failOff + 5] != 0xFF) continue;
@@ -191,20 +188,16 @@ namespace CloudFix
         // Returns offset of the 75/EB byte.
         public static int FindPayloadPatch5(byte[] data, int tStart, int tEnd)
         {
-            // pattern: E8 ?? ?? ?? ?? 48 85 F6 [75|EB]
-            // we also verify the lea rcx,[rsp+??] follows shortly after the jump target
             for (int i = tStart; i < tEnd - 12; i++)
             {
                 if (data[i] != 0xE8) continue;
                 if (data[i + 5] != 0x48 || data[i + 6] != 0x85 || data[i + 7] != 0xF6) continue;
                 if (data[i + 8] != 0x75 && data[i + 8] != 0xEB) continue;
 
-                // verify a jmp back to a loop exists within the skip range (sleep + retry)
                 int skipDist = data[i + 9];
                 int afterSkip = i + 10 + skipDist;
                 if (afterSkip > tEnd) continue;
 
-                // look for a backwards jmp (E9 with negative offset) in the skip region
                 bool hasLoop = false;
                 for (int j = i + 10; j < afterSkip && j < tEnd - 5; j++)
                 {
@@ -217,6 +210,73 @@ namespace CloudFix
                 if (!hasLoop) continue;
 
                 return i + 8;
+            }
+            return -1;
+        }
+
+        // P10: prologue of sub_18000D3C0
+        // 48 89 74 24 xx | E9 xx xx xx xx, followed by 41 56 48 83 EC 30
+        public static int FindPayloadPatch10(byte[] data, int tStart, int tEnd)
+        {
+            for (int i = tStart; i < tEnd - 15; i++)
+            {
+                bool isOriginal = data[i] == 0x48 && data[i + 1] == 0x89 &&
+                                  data[i + 2] == 0x74 && data[i + 3] == 0x24;
+                bool isPatched = data[i] == 0xE9;
+
+                if (!isOriginal && !isPatched) continue;
+
+                if (data[i + 5] == 0x41 && data[i + 6] == 0x56 &&
+                    data[i + 7] == 0x48 && data[i + 8] == 0x83 &&
+                    data[i + 9] == 0xEC && data[i + 10] == 0x30)
+                {
+                    return i;
+                }
+            }
+            return -1;
+        }
+
+        // P7: call to sub_180042B60 (or redirected to code cave)
+        public static int FindPayloadPatch7(byte[] data, int tStart, int tEnd)
+        {
+            for (int i = tStart; i < tEnd - 10; i++)
+            {
+                if (data[i] != 0xE8) continue;
+
+                int rel = BitConverter.ToInt32(data, i + 1);
+                int target = i + 5 + rel;
+
+                if ((target >= 0x41000 && target <= 0x44000) ||
+                    (target >= 0x175000 && target <= 0x176000))
+                {
+                    if (i + 8 < tEnd && data[i + 5] == 0x48 && data[i + 6] == 0x85 && data[i + 7] == 0xC0)
+                        return i;
+                }
+            }
+            return -1;
+        }
+
+        // P8: .text section characteristics in PE header
+        public static int FindPayloadPatch8(byte[] data)
+        {
+            if (data.Length < 64) return -1;
+
+            int peOff = BitConverter.ToInt32(data, 0x3C);
+            if (peOff < 0 || peOff + 24 > data.Length) return -1;
+            if (data[peOff] != 'P' || data[peOff + 1] != 'E') return -1;
+
+            int numSections = BitConverter.ToUInt16(data, peOff + 6);
+            int optSize = BitConverter.ToUInt16(data, peOff + 20);
+            int firstSection = peOff + 24 + optSize;
+
+            for (int i = 0; i < numSections; i++)
+            {
+                int off = firstSection + i * 40;
+                if (off + 40 > data.Length) break;
+
+                if (data[off] == '.' && data[off + 1] == 't' &&
+                    data[off + 2] == 'e' && data[off + 3] == 'x' && data[off + 4] == 't')
+                    return off + 36;
             }
             return -1;
         }

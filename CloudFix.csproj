@@ -11,13 +11,14 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <PublishTrimmed>true</PublishTrimmed>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    <Version>0.2.0</Version>
+    <Version>0.3.0</Version>
     <NoWarn>CA1416</NoWarn>
     <ApplicationIcon>steam_logo3.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
     <EmbeddedResource Include="payload.cache" LogicalName="payload.cache" />
+    <EmbeddedResource Include="Stella\stella_fallback.dll" LogicalName="stella_fallback.dll" />
     <Compile Remove="ExtractTool\**" />
   </ItemGroup>
 

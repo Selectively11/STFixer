@@ -11,6 +11,7 @@ namespace CloudFix
         Patched,
         PartiallyPatched,
         UnknownVersion,
+        OutOfDate,
     }
 
     internal class PatchResult

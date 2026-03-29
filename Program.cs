@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
@@ -29,12 +30,28 @@ namespace CloudFix
             PrintHeader();
 
             _steamPath = DetectSteamPath();
+            if (_steamPath != null)
+            {
+                PrintLine($"Steam: {_steamPath}  (auto-detected)");
+                Console.Write("  Use this path? [Y/n] ");
+                var confirm = Console.ReadKey(true);
+                Console.WriteLine(confirm.KeyChar);
+                if (confirm.KeyChar is 'n' or 'N')
+                    _steamPath = null;
+            }
+
             if (_steamPath == null)
             {
-                PrintLine("Steam: not found");
-                PrintLine("Could not locate Steam install. Check your registry.");
-                Console.ReadKey(true);
-                return;
+                Console.WriteLine();
+                Console.Write("  Enter Steam path: ");
+                var custom = Console.ReadLine()?.Trim().Trim('"');
+                if (string.IsNullOrWhiteSpace(custom) || !Directory.Exists(custom))
+                {
+                    PrintRed("Invalid path.");
+                    Console.ReadKey(true);
+                    return;
+                }
+                _steamPath = custom;
             }
 
             PrintLine($"Steam: {_steamPath}");
@@ -85,7 +102,8 @@ namespace CloudFix
                 Console.WriteLine("  1. Setup SteamTools offline");
                 Console.WriteLine("  2. Enable  (patch cloud saves)");
                 Console.WriteLine("  3. Disable (restore originals)");
-                Console.WriteLine("  4. Exit");
+                Console.WriteLine("  4. Enable Morrenus fallback");
+                Console.WriteLine("  5. Exit");
                 Console.WriteLine();
                 Console.Write("  > ");
 
@@ -156,6 +174,15 @@ namespace CloudFix
                         break;
 
                     case '4':
+                        ClearScreen();
+                        PrintHeader();
+                        PrintLine($"Steam: {_steamPath}");
+                        PrintSep();
+                        Console.WriteLine();
+                        RunFallbackSetup(patcher);
+                        break;
+
+                    case '5':
                         return;
                 }
             }
@@ -197,11 +224,68 @@ namespace CloudFix
                 PrintGreen($"Offline:    {offlineLabel}");
             else
                 PrintRed($"Offline:    {offlineLabel}");
+
+            var fallbackState = patcher.GetFallbackPatchState();
+            string fallbackLabel = fallbackState switch
+            {
+                PatchState.Unpatched => "not patched",
+                PatchState.Patched => "active",
+                PatchState.OutOfDate => "out of date",
+                PatchState.PartiallyPatched => "partially patched",
+                PatchState.UnknownVersion => "unknown payload version",
+                PatchState.NotInstalled => "payload not found",
+                _ => "unknown"
+            };
+
+            if (fallbackState == PatchState.Patched)
+                PrintGreen($"Fallback:   {fallbackLabel}");
+            else if (fallbackState == PatchState.OutOfDate)
+                PrintYellow($"Fallback:   {fallbackLabel}");
+            else
+                PrintRed($"Fallback:   {fallbackLabel}");
+        }
+
+        static void RunFallbackSetup(Patcher patcher)
+        {
+            string apiKey = null;
+            var cfgPath = Path.Combine(_steamPath, "stella.cfg");
+
+            if (File.Exists(cfgPath))
+            {
+                PrintLine("stella.cfg found, using existing API key.");
+            }
+            else
+            {
+                PrintLine("Enter your Morrenus API key:");
+                Console.Write("  > ");
+                apiKey = Console.ReadLine()?.Trim();
+                if (string.IsNullOrWhiteSpace(apiKey))
+                {
+                    PrintRed("No API key provided.");
+                    WaitForKey();
+                    return;
+                }
+            }
+
+            var result = patcher.ApplyFallback(apiKey);
+            Console.WriteLine();
+            if (result.Succeeded)
+            {
+                PrintGreen("Morrenus fallback: enabled");
+                if (!OfferSteamRestart())
+                    WaitForKey();
+            }
+            else
+            {
+                PrintRed($"Error: {result.Error}");
+                WaitForKey();
+            }
         }
 
         static string DetectSteamPath()
         {
-            // check both 64 and 32 bit registry views
+            var candidates = new List<string>();
+
             string[] keys =
             {
                 @"HKEY_LOCAL_MACHINE\SOFTWARE\Valve\Steam",
@@ -214,8 +298,8 @@ namespace CloudFix
                 try
                 {
                     var val = Registry.GetValue(key, "InstallPath", null) as string;
-                    if (val != null && Directory.Exists(val))
-                        return val;
+                    if (val != null && Directory.Exists(val) && !candidates.Contains(val))
+                        candidates.Add(val);
                 }
                 catch (Exception) { }
             }
@@ -229,11 +313,22 @@ namespace CloudFix
 
             foreach (var path in guesses)
             {
-                if (Directory.Exists(path))
-                    return path;
+                if (Directory.Exists(path) && !candidates.Contains(path))
+                    candidates.Add(path);
             }
 
-            return null;
+            // prefer the path that actually has SteamTools
+            foreach (var path in candidates)
+            {
+                foreach (var dll in new[] { "xinput1_4.dll", "dwmapi.dll" })
+                {
+                    if (File.Exists(Path.Combine(path, dll)))
+                        return path;
+                }
+            }
+
+            // fall back to first valid Steam dir
+            return candidates.Count > 0 ? candidates[0] : null;
         }
 
         static void PrintHeader()
@@ -345,6 +440,13 @@ namespace CloudFix
         internal static void PrintRed(string msg)
         {
             Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"  {msg}");
+            Console.ResetColor();
+        }
+
+        internal static void PrintYellow(string msg)
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
             Console.WriteLine($"  {msg}");
             Console.ResetColor();
         }

@@ -3,3 +3,10 @@ obj/
 *.user
 *.suo
 .vs/
+ExtractTool/
+Stella/*.obj
+Stella/*.lib
+Stella/*.exp
+Stella/*.pdb
+Stella/*.dll
+publish*/

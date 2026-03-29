@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
 using System.Security.Cryptography;
 
 namespace CloudFix
@@ -48,12 +49,129 @@ namespace CloudFix
                 new byte[] { 0xEB }),
         };
 
+        // v4 diagnostic: P10 = prologue capture at sub_18000D3C0 entry,
+        // P7 = retry loop redirect to fallback_stub, P8 = .text WRITE flag
+        static readonly PatchEntry[] FallbackPatches =
+        {
+            new PatchEntry(0xC7C0,
+                new byte[] { 0x48, 0x89, 0x74, 0x24, 0x18 },
+                new byte[] { 0xE9, 0x43, 0x8F, 0x16, 0x00 }),
+            new PatchEntry(0xC7EC,
+                new byte[] { 0x75, 0x3D },
+                new byte[] { 0x90, 0x90 }),
+            new PatchEntry(0xC803,
+                new byte[] { 0xE8, 0x58, 0x57, 0x03, 0x00 },
+                new byte[] { 0xE8, 0x1F, 0x8F, 0x16, 0x00 }),
+            new PatchEntry(0x1AC,
+                new byte[] { 0x20, 0x00, 0x00, 0x60 },
+                new byte[] { 0x20, 0x00, 0x00, 0xE0 }),
+        };
+
+        const int CodeCaveFileOffset = 0x1756F0;
+
+        static readonly byte[] CodeCaveContent =
+        {
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x48, 0x89, 0x0D, 0xE1, 0xFF, 0xFF, 0xFF, 0x48,
+            0x89, 0x15, 0xE2, 0xFF, 0xFF, 0xFF, 0x4C, 0x89, 0x05, 0xE3, 0xFF, 0xFF, 0xFF, 0x48, 0x89, 0x74,
+            0x24, 0x18, 0xE9, 0x9E, 0x70, 0xE9, 0xFF, 0x53, 0x57, 0x56, 0x48, 0x83, 0xEC, 0x30, 0x48, 0x8B,
+            0xF1, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x48, 0x8D, 0x0D, 0x3E, 0x00,
+            0x00, 0x00, 0xFF, 0x15, 0x08, 0x0F, 0x00, 0x00, 0x48, 0x85, 0xC0, 0x74, 0x2F, 0x48, 0x8B, 0xF8,
+            0x48, 0x8D, 0x15, 0x3D, 0x00, 0x00, 0x00, 0x48, 0x8B, 0xCF, 0xFF, 0x15, 0x40, 0x12, 0x00, 0x00,
+            0x48, 0x85, 0xC0, 0x74, 0x17, 0x48, 0x8B, 0xD8, 0x48, 0x8B, 0x0D, 0x91, 0xFF, 0xFF, 0xFF, 0x48,
+            0x8B, 0xD6, 0xFF, 0xD3, 0x48, 0x83, 0xC4, 0x30, 0x5E, 0x5F, 0x5B, 0xC3, 0x31, 0xC0, 0xEB, 0xF4,
+            0x73, 0x74, 0x65, 0x6C, 0x6C, 0x61, 0x5F, 0x66, 0x61, 0x6C, 0x6C, 0x62, 0x61, 0x63, 0x6B, 0x2E,
+            0x64, 0x6C, 0x6C, 0x00, 0x53, 0x74, 0x65, 0x6C, 0x6C, 0x61, 0x47, 0x65, 0x74, 0x52, 0x65, 0x71,
+            0x75, 0x65, 0x73, 0x74, 0x43, 0x6F, 0x64, 0x65, 0x00,
+        };
+
         string _steamPath;
         bool _verbose;
+
+        byte[] _cachedPayload;
+        long _cachedPayloadTicks;
 
         public Patcher(string steamPath)
         {
             _steamPath = steamPath;
+        }
+
+        static byte[] ReadFileShared(string path)
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            var buf = new byte[fs.Length];
+            fs.ReadExactly(buf);
+            return buf;
+        }
+
+        byte[] GetDecryptedPayload(string cachePath)
+        {
+            var info = new FileInfo(cachePath);
+            if (!info.Exists) return null;
+
+            long ticks = info.LastWriteTimeUtc.Ticks;
+            if (_cachedPayload != null && _cachedPayloadTicks == ticks)
+                return _cachedPayload;
+
+            byte[] raw;
+            try
+            {
+                using var fs = new FileStream(cachePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                raw = new byte[fs.Length];
+                fs.ReadExactly(raw);
+            }
+            catch (IOException) { return null; }
+
+            if (raw.Length < 32) return null;
+
+            try
+            {
+                var iv = raw.AsSpan(0, 16).ToArray();
+                var ct = raw.AsSpan(16).ToArray();
+                var dec = AesCbcDecrypt(ct, AesKey, iv);
+                using var zIn = new ZLibStream(
+                    new MemoryStream(dec, 4, dec.Length - 4),
+                    CompressionMode.Decompress);
+                using var ms = new MemoryStream();
+                zIn.CopyTo(ms);
+                _cachedPayload = ms.ToArray();
+                _cachedPayloadTicks = ticks;
+                return _cachedPayload;
+            }
+            catch { return null; }
+        }
+
+        (byte[] payload, byte[] iv, string error) ReadAndDecryptPayload(string cachePath)
+        {
+            byte[] raw;
+            try { raw = ReadFileShared(cachePath); }
+            catch (IOException) { return (null, null, "Payload cache is in use - close Steam first"); }
+
+            if (raw.Length < 32)
+                return (null, null, "Cache file too small");
+
+            var iv = raw.AsSpan(0, 16).ToArray();
+            var ct = raw.AsSpan(16).ToArray();
+
+            Log("  Decrypting..");
+            byte[] dec;
+            try { dec = AesCbcDecrypt(ct, AesKey, iv); }
+            catch (Exception ex) { return (null, null, $"Decryption failed: {ex.Message}"); }
+
+            byte[] payload;
+            try
+            {
+                using var zIn = new ZLibStream(
+                    new MemoryStream(dec, 4, dec.Length - 4),
+                    CompressionMode.Decompress);
+                using var ms = new MemoryStream();
+                zIn.CopyTo(ms);
+                payload = ms.ToArray();
+            }
+            catch (Exception ex) { return (null, null, $"Decompression failed: {ex.Message}"); }
+
+            Log($"  Payload: {payload.Length} bytes");
+            return (payload, iv, null);
         }
 
         string FindCoreDll()
@@ -95,8 +213,7 @@ namespace CloudFix
             }
             catch (IOException)
             {
-                Log($"Warning: could not read {hijackDll} (file may be in use by Steam)");
-                return PatchState.Unpatched;
+                return PatchState.UnknownVersion;
             }
 
             var resolvedCore = ResolveCorePatchOffsets(dll);
@@ -119,36 +236,13 @@ namespace CloudFix
         {
             _verbose = false;
 
-            var cachePath = Fingerprint.FindCachePath(_steamPath);
+            var cachePath = Fingerprint.FindCachePath(_steamPath, verbose: false);
             if (cachePath == null)
                 return PatchState.NotInstalled;
 
-            byte[] raw;
-            try
-            {
-                using var fs = new FileStream(cachePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-                raw = new byte[fs.Length];
-                fs.ReadExactly(raw);
-            }
-            catch (IOException) { return PatchState.NotInstalled; }
-
-            if (raw.Length < 32)
+            var payload = GetDecryptedPayload(cachePath);
+            if (payload == null)
                 return PatchState.UnknownVersion;
-
-            byte[] payload;
-            try
-            {
-                var iv = raw.AsSpan(0, 16).ToArray();
-                var ct = raw.AsSpan(16).ToArray();
-                var dec = AesCbcDecrypt(ct, AesKey, iv);
-                using var zIn = new ZLibStream(
-                    new MemoryStream(dec, 4, dec.Length - 4),
-                    CompressionMode.Decompress);
-                using var ms = new MemoryStream();
-                zIn.CopyTo(ms);
-                payload = ms.ToArray();
-            }
-            catch { return PatchState.UnknownVersion; }
 
             var resolved = ResolveSetupPatchOffsets(payload);
             if (resolved == null)
@@ -178,14 +272,14 @@ namespace CloudFix
                     return result.Fail("SteamTools Core DLL not found. Is SteamTools installed?");
 
                 var dllPath = Path.Combine(_steamPath, hijackDll);
-                var dllData = File.ReadAllBytes(dllPath);
+                byte[] dllData;
+                try { dllData = ReadFileShared(dllPath); }
+                catch (IOException) { return result.Fail($"{hijackDll} is in use - close Steam first"); }
 
                 Log($"Patching {hijackDll}..");
                 var resolvedCore = ResolveCorePatchOffsets(dllData);
                 if (resolvedCore == null)
                     return result.Fail($"Could not identify patch locations in {hijackDll} - unsupported version?");
-
-                Backup(dllPath);
 
                 var (patchedDll, dllApplied, dllSkipped, dllErrors) = ApplyPatches(dllData, resolvedCore);
                 if (dllErrors.Count > 0)
@@ -193,17 +287,6 @@ namespace CloudFix
                     foreach (var err in dllErrors) Log(err);
                     return result.Fail("Byte mismatch in " + hijackDll + " - wrong version?");
                 }
-
-                if (dllApplied > 0)
-                {
-                    File.WriteAllBytes(dllPath, patchedDll);
-                    Log($"  {dllApplied} patch(es) applied" + (dllSkipped > 0 ? $", {dllSkipped} already done" : ""));
-                }
-                else
-                {
-                    Log("  Already patched");
-                }
-                result.DllPatched = true;
 
                 var cachePath = Fingerprint.FindCachePath(_steamPath);
                 if (cachePath == null)
@@ -215,33 +298,10 @@ namespace CloudFix
                 }
 
                 Log("Patching payload (offline setup)..");
-                Backup(cachePath);
 
-                var raw = File.ReadAllBytes(cachePath);
-                if (raw.Length < 32)
-                    return result.Fail("Cache file too small");
-
-                var iv = raw.AsSpan(0, 16).ToArray();
-                var ct = raw.AsSpan(16).ToArray();
-
-                Log("  Decrypting..");
-                byte[] dec;
-                try { dec = AesCbcDecrypt(ct, AesKey, iv); }
-                catch (Exception ex) { return result.Fail($"Decryption failed: {ex.Message}"); }
-
-                byte[] payload;
-                try
-                {
-                    using var zIn = new ZLibStream(
-                        new MemoryStream(dec, 4, dec.Length - 4),
-                        CompressionMode.Decompress);
-                    using var ms = new MemoryStream();
-                    zIn.CopyTo(ms);
-                    payload = ms.ToArray();
-                }
-                catch (Exception ex) { return result.Fail($"Decompression failed: {ex.Message}"); }
-
-                Log($"  Payload: {payload.Length} bytes");
+                var (payload, iv, plErr) = ReadAndDecryptPayload(cachePath);
+                if (payload == null)
+                    return result.Fail(plErr);
 
                 var resolvedSetup = ResolveSetupPatchOffsets(payload);
                 if (resolvedSetup == null)
@@ -254,14 +314,28 @@ namespace CloudFix
                     return result.Fail("Byte mismatch in payload - wrong version?");
                 }
 
-                if (plApplied > 0)
+                // all patches verified - now write both files
+                Backup(dllPath);
+                if (dllApplied > 0)
                 {
-                    ReEncryptAndWrite(cachePath, patchedPayload, iv);
-                    Log($"  {plApplied} patch(es) applied" + (plSkipped > 0 ? $", {plSkipped} already done" : ""));
+                    File.WriteAllBytes(dllPath, patchedDll);
+                    Log($"  {dllApplied} patch(es) applied to {hijackDll}" + (dllSkipped > 0 ? $", {dllSkipped} already done" : ""));
                 }
                 else
                 {
-                    Log("  Already patched");
+                    Log($"  {hijackDll}: already patched");
+                }
+                result.DllPatched = true;
+
+                Backup(cachePath);
+                if (plApplied > 0)
+                {
+                    ReEncryptAndWrite(cachePath, patchedPayload, iv);
+                    Log($"  {plApplied} patch(es) applied to payload" + (plSkipped > 0 ? $", {plSkipped} already done" : ""));
+                }
+                else
+                {
+                    Log("  Payload: already patched");
                 }
                 result.CachePatched = true;
 
@@ -289,14 +363,14 @@ namespace CloudFix
                     return result.Fail("SteamTools Core DLL not found. Is SteamTools installed?");
 
                 var dllPath = Path.Combine(_steamPath, hijackDll);
-                var dllData = File.ReadAllBytes(dllPath);
+                byte[] dllData;
+                try { dllData = ReadFileShared(dllPath); }
+                catch (IOException) { return result.Fail($"{hijackDll} is in use - close Steam first"); }
 
                 Log($"Patching {hijackDll}..");
                 var resolvedCore = ResolveCorePatchOffsets(dllData);
                 if (resolvedCore == null)
                     return result.Fail($"Could not identify patch locations in {hijackDll} - unsupported version?");
-
-                Backup(dllPath);
 
                 var (patchedDll, dllApplied, dllSkipped, dllErrors) = ApplyPatches(dllData, resolvedCore);
                 if (dllErrors.Count > 0)
@@ -305,78 +379,64 @@ namespace CloudFix
                     return result.Fail("Byte mismatch in " + hijackDll + " - wrong version?");
                 }
 
+                var cachePath = Fingerprint.FindCachePath(_steamPath);
+                byte[] patchedPayload = null;
+                byte[] iv = null;
+                int plApplied = 0, plSkipped = 0;
+
+                if (cachePath != null)
+                {
+                    Log("Patching payload in cache..");
+
+                    byte[] payload;
+                    (payload, iv, var plErr) = ReadAndDecryptPayload(cachePath);
+                    if (payload == null)
+                        return result.Fail(plErr);
+
+                    var resolvedPayload = ResolvePayloadPatchOffsets(payload);
+                    if (resolvedPayload == null)
+                        return result.Fail("Could not identify patch locations in payload - unsupported version?");
+
+                    List<string> plErrors;
+                    (patchedPayload, plApplied, plSkipped, plErrors) = ApplyPatches(payload, resolvedPayload);
+                    if (plErrors.Count > 0)
+                    {
+                        foreach (var err in plErrors) Log(err);
+                        return result.Fail("Byte mismatch in payload - wrong version?");
+                    }
+                }
+
+                // all patches verified - now write
+                Backup(dllPath);
                 if (dllApplied > 0)
                 {
                     File.WriteAllBytes(dllPath, patchedDll);
-                    Log($"  {dllApplied} patch(es) applied" + (dllSkipped > 0 ? $", {dllSkipped} already done" : ""));
+                    Log($"  {dllApplied} patch(es) applied to {hijackDll}" + (dllSkipped > 0 ? $", {dllSkipped} already done" : ""));
                 }
                 else
                 {
-                    Log("  Already patched");
+                    Log($"  {hijackDll}: already patched");
                 }
                 result.DllPatched = true;
 
-                var cachePath = Fingerprint.FindCachePath(_steamPath);
                 if (cachePath == null)
                 {
                     Log("Payload cache not found. Run offline setup first, or wait for SteamTools to download it.");
-                    result.Succeeded = true;
-                    return result;
-                }
-
-                Log("Patching payload in cache..");
-                Backup(cachePath);
-
-                var raw = File.ReadAllBytes(cachePath);
-                if (raw.Length < 32)
-                    return result.Fail("Cache file too small");
-
-                var iv = raw.AsSpan(0, 16).ToArray();
-                var ct = raw.AsSpan(16).ToArray();
-
-                Log("  Decrypting..");
-                byte[] dec;
-                try { dec = AesCbcDecrypt(ct, AesKey, iv); }
-                catch (Exception ex) { return result.Fail($"Decryption failed: {ex.Message}"); }
-
-                int expectedSize = BitConverter.ToInt32(dec, 0);
-                byte[] payload;
-                try
-                {
-                    using var zIn = new ZLibStream(
-                        new MemoryStream(dec, 4, dec.Length - 4),
-                        CompressionMode.Decompress);
-                    using var ms = new MemoryStream();
-                    zIn.CopyTo(ms);
-                    payload = ms.ToArray();
-                }
-                catch (Exception ex) { return result.Fail($"Decompression failed: {ex.Message}"); }
-
-                Log($"  Payload: {payload.Length} bytes");
-                if (payload.Length != expectedSize)
-                    Log($"  Warning: size mismatch ({payload.Length} vs header {expectedSize})");
-
-                var resolvedPayload = ResolvePayloadPatchOffsets(payload);
-                if (resolvedPayload == null)
-                    return result.Fail("Could not identify patch locations in payload - unsupported version?");
-
-                var (patchedPayload, plApplied, plSkipped, plErrors) = ApplyPatches(payload, resolvedPayload);
-                if (plErrors.Count > 0)
-                {
-                    foreach (var err in plErrors) Log(err);
-                    return result.Fail("Byte mismatch in payload - wrong version?");
-                }
-
-                if (plApplied > 0)
-                {
-                    ReEncryptAndWrite(cachePath, patchedPayload, iv);
-                    Log($"  {plApplied} patch(es) applied" + (plSkipped > 0 ? $", {plSkipped} already done" : ""));
                 }
                 else
                 {
-                    Log("  Already patched");
+                    Backup(cachePath);
+                    if (plApplied > 0)
+                    {
+                        ReEncryptAndWrite(cachePath, patchedPayload, iv);
+                        Log($"  {plApplied} patch(es) applied to payload" + (plSkipped > 0 ? $", {plSkipped} already done" : ""));
+                    }
+                    else
+                    {
+                        Log("  Payload: already patched");
+                    }
+                    result.CachePatched = true;
                 }
-                result.CachePatched = true;
 
                 result.Succeeded = true;
                 Log("Done.");
@@ -416,13 +476,15 @@ namespace CloudFix
                     var cacheDir = Path.Combine(_steamPath, "appcache", "httpcache", "3b");
                     if (Directory.Exists(cacheDir))
                     {
-                        foreach (var f in Directory.GetFiles(cacheDir, "*.bak"))
+                        foreach (var f in Directory.GetFiles(cacheDir, "*.bak").Concat(
+                                          Directory.GetFiles(cacheDir, "*.orig")))
                         {
-                            var orig = f[..^4];
-                            var fname = Path.GetFileName(orig);
+                            var ext = Path.GetExtension(f);
+                            var basePath = f[..^ext.Length];
+                            var fname = Path.GetFileName(basePath);
                             if (fname.Length == 16)
                             {
-                                RestoreBackup(orig, "payload cache");
+                                RestoreBackup(basePath, "payload cache");
                                 restored++;
                                 break;
                             }
@@ -432,6 +494,7 @@ namespace CloudFix
 
                 if (restored > 0)
                 {
+                    CleanupStellaFiles();
                     Log($"Restored {restored} file(s).");
                     result.Succeeded = true;
                 }
@@ -448,6 +511,145 @@ namespace CloudFix
             }
 
             return result;
+        }
+
+        public PatchState GetFallbackPatchState()
+        {
+            _verbose = false;
+
+            var cachePath = Fingerprint.FindCachePath(_steamPath, verbose: false);
+            if (cachePath == null)
+                return PatchState.NotInstalled;
+
+            var payload = GetDecryptedPayload(cachePath);
+            if (payload == null)
+                return PatchState.UnknownVersion;
+
+            var resolved = ResolveFallbackPatchOffsets(payload);
+            if (resolved == null)
+                return PatchState.UnknownVersion;
+
+            var (_, applied, skipped, errors) = CheckPatches(payload, resolved);
+
+            if (errors.Count > 0)
+                return PatchState.UnknownVersion;
+
+            bool caveWritten = CodeCaveFileOffset + CodeCaveContent.Length <= payload.Length
+                && BytesMatch(payload, CodeCaveFileOffset, CodeCaveContent, 0, CodeCaveContent.Length);
+
+            if (applied == 0 && skipped == resolved.Length)
+                return caveWritten ? PatchState.Patched : PatchState.OutOfDate;
+            if (skipped == 0 && applied == resolved.Length)
+                return PatchState.Unpatched;
+
+            return PatchState.PartiallyPatched;
+        }
+
+        public PatchResult ApplyFallback(string apiKey)
+        {
+            _verbose = true;
+            var result = new PatchResult();
+
+            try
+            {
+                var cachePath = Fingerprint.FindCachePath(_steamPath);
+                if (cachePath == null)
+                {
+                    Log("Payload cache not found. Deploying embedded payload..");
+                    cachePath = DeployEmbeddedPayload();
+                    if (cachePath == null)
+                        return result.Fail("Could not deploy payload cache.");
+                }
+
+                Log("Patching payload (Morrenus fallback)..");
+                Backup(cachePath);
+
+                var (payload, iv, plErr) = ReadAndDecryptPayload(cachePath);
+                if (payload == null)
+                    return result.Fail(plErr);
+
+                var resolved = ResolveFallbackPatchOffsets(payload);
+                if (resolved == null)
+                    return result.Fail("Could not locate fallback patch sites in payload");
+
+                var (patchedPayload, plApplied, plSkipped, plErrors) = ApplyPatches(payload, resolved);
+                if (plErrors.Count > 0)
+                {
+                    foreach (var err in plErrors) Log(err);
+                    return result.Fail("Byte mismatch at fallback patch sites");
+                }
+
+                if (CodeCaveFileOffset + CodeCaveContent.Length > patchedPayload.Length)
+                    return result.Fail("Payload too small for code cave injection");
+
+                bool caveAlready = BytesMatch(patchedPayload, CodeCaveFileOffset,
+                    CodeCaveContent, 0, CodeCaveContent.Length);
+
+                var stellaErr = DeployStella(apiKey);
+                if (stellaErr != null)
+                    return result.Fail(stellaErr);
+
+                if (plApplied > 0 || !caveAlready)
+                {
+                    Buffer.BlockCopy(CodeCaveContent, 0, patchedPayload, CodeCaveFileOffset, CodeCaveContent.Length);
+                    ReEncryptAndWrite(cachePath, patchedPayload, iv);
+                    int total = plApplied + (caveAlready ? 0 : 1);
+                    Log($"  {total} change(s) applied" + (plSkipped > 0 ? $", {plSkipped} already done" : ""));
+                }
+                else
+                {
+                    Log("  Already patched");
+                }
+                result.CachePatched = true;
+
+                result.Succeeded = true;
+                Log("Done.");
+            }
+            catch (Exception ex)
+            {
+                result.Fail($"Unexpected error: {ex.Message}");
+                Log($"Error: {ex.Message}");
+            }
+
+            return result;
+        }
+
+        string DeployStella(string apiKey)
+        {
+            var dllDest = Path.Combine(_steamPath, "stella_fallback.dll");
+            var cfgDest = Path.Combine(_steamPath, "stella.cfg");
+
+            using var stream = typeof(Patcher).Assembly
+                .GetManifestResourceStream("stella_fallback.dll");
+            if (stream != null)
+            {
+                try
+                {
+                    using var fs = new FileStream(dllDest, FileMode.Create, FileAccess.Write);
+                    stream.CopyTo(fs);
+                    Log($"  Deployed stella_fallback.dll to {_steamPath}");
+                }
+                catch (IOException)
+                {
+                    return "stella_fallback.dll is in use (close Steam first)";
+                }
+            }
+            else
+            {
+                return "stella_fallback.dll not embedded in build";
+            }
+
+            if (!string.IsNullOrWhiteSpace(apiKey))
+            {
+                File.WriteAllText(cfgDest, apiKey.Trim());
+                Log($"  Wrote API key to stella.cfg");
+            }
+            else if (!File.Exists(cfgDest))
+            {
+                return "no API key provided and stella.cfg not found";
+            }
+
+            return null;
         }
 
         void Log(string msg)
@@ -487,24 +689,56 @@ namespace CloudFix
 
         void Backup(string path)
         {
+            var orig = path + ".orig";
+            if (!File.Exists(orig))
+            {
+                File.Copy(path, orig);
+                Log($"  Original saved to {orig}");
+            }
+
             var bak = path + ".bak";
-            if (File.Exists(bak)) return;
-            File.Copy(path, bak);
+            File.Copy(path, bak, overwrite: true);
             Log($"  Backed up to {bak}");
         }
 
         bool RestoreBackup(string path, string label)
         {
+            var orig = path + ".orig";
             var bak = path + ".bak";
-            if (!File.Exists(bak))
+
+            string source = File.Exists(orig) ? orig : File.Exists(bak) ? bak : null;
+            if (source == null)
             {
                 Log($"  {label}: no backup found");
                 return false;
             }
-            File.Copy(bak, path, overwrite: true);
-            File.Delete(bak);
-            Log($"  {label}: restored from backup");
+
+            File.Copy(source, path, overwrite: true);
+
+            // clean up both backup files
+            try { if (File.Exists(orig)) File.Delete(orig); } catch { }
+            try { if (File.Exists(bak)) File.Delete(bak); } catch { }
+
+            Log($"  {label}: restored from {(source == orig ? "original" : "backup")}");
             return true;
+        }
+
+        void CleanupStellaFiles()
+        {
+            string[] names = { "stella_fallback.dll", "stella.cfg", "stella_debug.log" };
+            foreach (var name in names)
+            {
+                var path = Path.Combine(_steamPath, name);
+                try
+                {
+                    if (File.Exists(path))
+                    {
+                        File.Delete(path);
+                        Log($"  Removed {name}");
+                    }
+                }
+                catch (IOException) { }
+            }
         }
 
         static byte[] AesCbcDecrypt(byte[] ct, byte[] key, byte[] iv)
@@ -553,17 +787,20 @@ namespace CloudFix
             return true;
         }
 
-        static PatchEntry SnapshotPatch(byte[] data, int offset, PatchEntry template, int fixedPrefixLen)
+        static PatchEntry SnapshotPatch(byte[] data, int offset, PatchEntry template,
+            int wildcardStart = 0, int wildcardLen = 0)
         {
             int len = template.Original.Length;
-            var actual = new byte[len];
-            Buffer.BlockCopy(data, offset, actual, 0, len);
-
+            var orig = (byte[])template.Original.Clone();
             var repl = (byte[])template.Replacement.Clone();
-            if (fixedPrefixLen > 0 && fixedPrefixLen < len)
-                Buffer.BlockCopy(actual, fixedPrefixLen, repl, fixedPrefixLen, len - fixedPrefixLen);
 
-            return new PatchEntry(offset, actual, repl);
+            if (wildcardLen > 0 && wildcardStart + wildcardLen <= len)
+            {
+                Buffer.BlockCopy(data, offset + wildcardStart, orig, wildcardStart, wildcardLen);
+                Buffer.BlockCopy(data, offset + wildcardStart, repl, wildcardStart, wildcardLen);
+            }
+
+            return new PatchEntry(offset, orig, repl);
         }
 
         static (byte[] data, int applied, int skipped, List<string> errors) CheckPatches(byte[] data, PatchEntry[] patches)
@@ -677,8 +914,8 @@ namespace CloudFix
             Log($"  Core patches at 0x{p1:X}, 0x{p2:X}");
             return new PatchEntry[]
             {
-                SnapshotPatch(dll, p1, CorePatches[0], 0),
-                SnapshotPatch(dll, p2, CorePatches[1], 0),
+                SnapshotPatch(dll, p1, CorePatches[0]),
+                SnapshotPatch(dll, p2, CorePatches[1]),
             };
         }
 
@@ -748,9 +985,9 @@ namespace CloudFix
             Log($"  Payload patches at 0x{p1:X}, 0x{p2:X}, 0x{p3:X}");
             return new PatchEntry[]
             {
-                SnapshotPatch(payload, p1, PayloadPatches[0], 2),
-                SnapshotPatch(payload, p2, PayloadPatches[1], 0),
-                SnapshotPatch(payload, p3, PayloadPatches[2], 0),
+                SnapshotPatch(payload, p1, PayloadPatches[0], wildcardStart: 2, wildcardLen: 4),
+                SnapshotPatch(payload, p2, PayloadPatches[1]),
+                SnapshotPatch(payload, p3, PayloadPatches[2]),
             };
         }
 
@@ -780,8 +1017,60 @@ namespace CloudFix
             Log($"  Setup patches at 0x{p4:X}, 0x{p5:X}");
             return new PatchEntry[]
             {
-                SnapshotPatch(payload, p4, PayloadPatches[3], 6),
-                SnapshotPatch(payload, p5, PayloadPatches[4], 0),
+                SnapshotPatch(payload, p4, PayloadPatches[3], wildcardStart: 2, wildcardLen: 4),
+                SnapshotPatch(payload, p5, PayloadPatches[4]),
+            };
+        }
+
+        PatchEntry[] ResolveFallbackPatchOffsets(byte[] payload)
+        {
+            if (!ResolvePayloadSections(payload, out int tStart, out int tEnd, out _, out _))
+                return null;
+
+            int p10 = TryHardcodedOrScan(payload, FallbackPatches[0].Offset,
+                FallbackPatches[0].Original, FallbackPatches[0].Replacement,
+                () => Signatures.FindPayloadPatch10(payload, tStart, tEnd));
+            if (p10 < 0)
+            {
+                Log("  Payload: could not locate Flow #3 prologue (sub_18000D3C0)");
+                return null;
+            }
+
+            // jnz is always 0x2C bytes after function start
+            int pJnz = p10 + 0x2C;
+            if (pJnz + 2 > payload.Length ||
+                (!BytesMatch(payload, pJnz, FallbackPatches[1].Original, 0, 2) &&
+                 !BytesMatch(payload, pJnz, FallbackPatches[1].Replacement, 0, 2)))
+            {
+                Log("  Payload: could not locate jnz (result==15 check)");
+                return null;
+            }
+
+            int p7 = TryHardcodedOrScan(payload, FallbackPatches[2].Offset,
+                FallbackPatches[2].Original, FallbackPatches[2].Replacement,
+                () => Signatures.FindPayloadPatch7(payload, tStart, tEnd));
+            if (p7 < 0)
+            {
+                Log("  Payload: could not locate hook call site");
+                return null;
+            }
+
+            int p8 = TryHardcodedOrScan(payload, FallbackPatches[3].Offset,
+                FallbackPatches[3].Original, FallbackPatches[3].Replacement,
+                () => Signatures.FindPayloadPatch8(payload));
+            if (p8 < 0)
+            {
+                Log("  Payload: could not locate .text section header");
+                return null;
+            }
+
+            Log($"  Fallback patches at 0x{p10:X}, 0x{pJnz:X}, 0x{p7:X}, 0x{p8:X}");
+            return new PatchEntry[]
+            {
+                SnapshotPatch(payload, p10, FallbackPatches[0]),
+                SnapshotPatch(payload, pJnz, FallbackPatches[1]),
+                SnapshotPatch(payload, p7, FallbackPatches[2]),
+                SnapshotPatch(payload, p8, FallbackPatches[3]),
             };
         }
     }
