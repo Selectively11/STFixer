@@ -11,7 +11,7 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <PublishTrimmed>true</PublishTrimmed>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    <Version>0.5.2</Version>
+    <Version>0.5.3</Version>
     <NoWarn>CA1416</NoWarn>
     <ApplicationIcon>steam_logo3.ico</ApplicationIcon>
   </PropertyGroup>
