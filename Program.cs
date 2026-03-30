@@ -231,6 +231,19 @@ namespace CloudFix
 
         static void RunDiagnostics(Patcher patcher)
         {
+            try
+            {
+                RunDiagnosticsInner(patcher);
+            }
+            catch (Exception ex)
+            {
+                PrintRed($"Diagnostics error: {ex.Message}");
+                PrintLine("Payload cache may be corrupt. Delete the appcache/httpcache folder and restart Steam.");
+            }
+        }
+
+        static void RunDiagnosticsInner(Patcher patcher)
+        {
             var cloudState = patcher.GetPatchState();
             string cloudLabel = cloudState switch
             {

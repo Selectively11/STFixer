@@ -67,6 +67,7 @@ namespace CloudFix
         // Pattern: 85 C0 74 xx 33 FF E9 (hash compare fall-through)
         public static int FindCorePatch2(byte[] data, int start, int end)
         {
+            end = Math.Min(end, data.Length);
             for (int i = start; i < end - 6; i++)
             {
                 if (data[i] == 0x85 && data[i + 1] == 0xC0 &&
@@ -94,6 +95,7 @@ namespace CloudFix
         // Cloud rewrite jz: 85 C0 0F 85 ?? ?? 00 00 45 85 FF [0F 84 | 90 E9]
         public static int FindPayloadPatch1(byte[] data, int tStart, int tEnd)
         {
+            tEnd = Math.Min(tEnd, data.Length);
             for (int i = tStart; i < tEnd - 17; i++)
             {
                 if (data[i] == 0x85 && data[i + 1] == 0xC0 &&
@@ -116,6 +118,7 @@ namespace CloudFix
         public static int FindPayloadPatch2(byte[] data, int start, int end)
         {
             byte[] tail = { 0x48, 0x8D, 0x14, 0x3E };
+            end = Math.Min(end, data.Length);
 
             for (int i = start; i < end - 10; i++)
             {
@@ -135,6 +138,7 @@ namespace CloudFix
         // Anchor: Spacewar 480 constant (C7 40 09 E0 01 00 00), then next 89 3D or 6x NOP
         public static int FindPayloadPatch3(byte[] data, int gStart, int gEnd)
         {
+            gEnd = Math.Min(gEnd, data.Length);
             byte[] spacewar = { 0xC7, 0x40, 0x09, 0xE0, 0x01, 0x00, 0x00 };
             int anchor = ScanForBytes(data, gStart, gEnd, spacewar);
             if (anchor < 0)
@@ -158,6 +162,7 @@ namespace CloudFix
         // activation flag: paired C6 05 xx xx FE FF 01/00 instructions with E9 bridge between them
         public static int FindPayloadPatch4(byte[] data, int gStart, int gEnd)
         {
+            gEnd = Math.Min(gEnd, data.Length);
             for (int i = gStart; i < gEnd - 24; i++)
             {
                 if (data[i] != 0xC6 || data[i + 1] != 0x05) continue;
@@ -184,6 +189,7 @@ namespace CloudFix
         // GetCookie retry skip: E8 call followed by 48 85 F6 / 75 with a backwards jmp in the skip range
         public static int FindPayloadPatch5(byte[] data, int tStart, int tEnd)
         {
+            tEnd = Math.Min(tEnd, data.Length);
             for (int i = tStart; i < tEnd - 12; i++)
             {
                 if (data[i] != 0xE8) continue;
@@ -214,6 +220,7 @@ namespace CloudFix
         // 48 89 74 24 xx | E9 xx xx xx xx, followed by 41 56 48 83 EC 30
         public static int FindPayloadPatch10(byte[] data, int tStart, int tEnd)
         {
+            tEnd = Math.Min(tEnd, data.Length);
             for (int i = tStart; i < tEnd - 15; i++)
             {
                 bool isOriginal = data[i] == 0x48 && data[i + 1] == 0x89 &&
@@ -241,6 +248,7 @@ namespace CloudFix
         // P7 with section-aware RVA calculation for accurate CALL target resolution
         public static int FindPayloadPatch7(byte[] data, int tStart, int tEnd, PeSection[] sections)
         {
+            tEnd = Math.Min(tEnd, data.Length);
             for (int i = tStart; i < tEnd - 10; i++)
             {
                 if (data[i] != 0xE8) continue;

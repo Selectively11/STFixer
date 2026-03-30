@@ -55,10 +55,14 @@ namespace CloudFix
             if (pe[peOff] != 'P' || pe[peOff + 1] != 'E') return Array.Empty<PeSection>();
 
             int numSections = BitConverter.ToUInt16(pe, peOff + 6);
+            if (numSections > 96) return Array.Empty<PeSection>();
+
             int optSize = BitConverter.ToUInt16(pe, peOff + 20);
             int firstSection = peOff + 24 + optSize;
+            if (firstSection > pe.Length) return Array.Empty<PeSection>();
 
             var result = new PeSection[numSections];
+            int populated = 0;
             for (int i = 0; i < numSections; i++)
             {
                 int off = firstSection + i * 40;
@@ -74,7 +78,10 @@ namespace CloudFix
                 int rawPtr = BitConverter.ToInt32(pe, off + 20);
 
                 result[i] = new PeSection(name, va, vsize, rawPtr, rawSize);
+                populated++;
             }
+            if (populated < numSections)
+                Array.Resize(ref result, populated);
             return result;
         }
 

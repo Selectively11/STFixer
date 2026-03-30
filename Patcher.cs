@@ -1056,6 +1056,13 @@ namespace CloudFix
             return true;
         }
 
+        static string SafeHexDump(byte[] data, int offset, int length)
+        {
+            if (offset < 0 || offset >= data.Length) return "(out of bounds)";
+            int available = Math.Min(length, data.Length - offset);
+            return BitConverter.ToString(data, offset, available);
+        }
+
         static PatchEntry SnapshotPatch(byte[] data, int offset, PatchEntry template,
             int wildcardStart = 0, int wildcardLen = 0)
         {
@@ -1063,7 +1070,8 @@ namespace CloudFix
             var orig = (byte[])template.Original.Clone();
             var repl = (byte[])template.Replacement.Clone();
 
-            if (wildcardLen > 0 && wildcardStart + wildcardLen <= len)
+            if (wildcardLen > 0 && wildcardStart + wildcardLen <= len
+                && offset + wildcardStart + wildcardLen <= data.Length)
             {
                 Buffer.BlockCopy(data, offset + wildcardStart, orig, wildcardStart, wildcardLen);
                 Buffer.BlockCopy(data, offset + wildcardStart, repl, wildcardStart, wildcardLen);
@@ -1084,7 +1092,7 @@ namespace CloudFix
                 else if (BytesMatch(data, p.Offset, p.Original, 0, p.Original.Length))
                     applied++;
                 else
-                    errors.Add($"  Mismatch at 0x{p.Offset:X}: expected {BitConverter.ToString(p.Original)}, got {BitConverter.ToString(data, p.Offset, p.Original.Length)}");
+                    errors.Add($"  Mismatch at 0x{p.Offset:X}: expected {BitConverter.ToString(p.Original)}, got {SafeHexDump(data, p.Offset, p.Original.Length)}");
             }
 
             return (data, applied, skipped, errors);
@@ -1109,7 +1117,7 @@ namespace CloudFix
                 }
                 else
                 {
-                    errors.Add($"  Mismatch at 0x{p.Offset:X}: expected {BitConverter.ToString(p.Original)}, got {BitConverter.ToString(buf, p.Offset, p.Original.Length)}");
+                    errors.Add($"  Mismatch at 0x{p.Offset:X}: expected {BitConverter.ToString(p.Original)}, got {SafeHexDump(buf, p.Offset, p.Original.Length)}");
                 }
             }
 
@@ -1158,7 +1166,7 @@ namespace CloudFix
                 return null;
             }
             int tStart = textSec.Value.RawOffset;
-            int tEnd = tStart + textSec.Value.RawSize;
+            int tEnd = Math.Min(tStart + textSec.Value.RawSize, dll.Length);
 
             int p1 = TryHardcodedOrScan(dll, CorePatches[0].Offset,
                 CorePatches[0].Original, CorePatches[0].Replacement,
@@ -1214,9 +1222,9 @@ namespace CloudFix
             }
 
             tStart = textSec.Value.RawOffset;
-            tEnd = tStart + textSec.Value.RawSize;
+            tEnd = Math.Min(tStart + textSec.Value.RawSize, payload.Length);
             gStart = obfSec.Value.RawOffset;
-            gEnd = gStart + obfSec.Value.RawSize;
+            gEnd = Math.Min(gStart + obfSec.Value.RawSize, payload.Length);
             return true;
         }
 
