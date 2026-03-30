@@ -6,11 +6,11 @@ Originally just a fix for the 'broken Capcom game saves' problem that is caused 
 
 ## What?
 
-SteamTools messes with Steam Cloud requests to "fix" Steam Cloud for non-owned games so that save syncing functions. It has those games read/write the App ID for Steam Screenshots! This causes all kinds of problems! Capcom titles are super impacted - the majority of Capcom titles released in the last few years will simply refuse to save at all in this scenario.
+SteamTools messes with Steam Cloud requests to "fix" Steam Cloud for non-owned games so that save syncing functions - or, rather, so that it used to work before Valve fixed it recently. Anyway, it has those games read/write the App ID for Steam Screenshots! This causes all kinds of problems! Capcom titles are super impacted - the majority of Capcom titles released in the last few years will simply refuse to save at all in this scenario.
 
 This tool fixes this behavior by disabling the SteamTools cloud "fix" and instead allowing Steam Cloud saving to fail to sync, as they should.
 
-It also fixes other weird SteamTools behaviors. You can install SteamTools, even if their backend is down. You can replace the SteamTools manifest endpoint with a different one. It can diagnose a broken SteamTools install and repair it. It's a good tool.
+This tool also can fix other weird SteamTools behaviors. You can install SteamTools, even if their backend is down. You can replace the SteamTools manifest endpoint with a different one. It can diagnose a broken SteamTools install and repair it. It's a good tool.
 
 
 ## Usage
