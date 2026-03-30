@@ -336,11 +336,11 @@ namespace CloudFix
             };
 
             if (offlineState == PatchState.Patched)
-                PrintGreen($"Offline:    {offlineLabel}");
+                PrintGreen($"Offline:               {offlineLabel}");
             else if (offlineState == PatchState.OutOfDate)
-                PrintYellow($"Offline:    {offlineLabel}");
+                PrintYellow($"Offline:               {offlineLabel}");
             else
-                PrintRed($"Offline:    {offlineLabel}");
+                PrintRed($"Offline:               {offlineLabel}");
 
             var fallbackState = patcher.GetFallbackPatchState();
             string fallbackLabel = fallbackState switch
@@ -357,14 +357,14 @@ namespace CloudFix
             if (fallbackState == PatchState.Patched)
             {
                 if (!patcher.IsStellaDllCurrent())
-                    PrintYellow($"Fallback:   {fallbackLabel} (DLL outdated)");
+                    PrintYellow($"Fallback:              {fallbackLabel} (DLL outdated)");
                 else
-                    PrintGreen($"Fallback:   {fallbackLabel}");
+                    PrintGreen($"Fallback:              {fallbackLabel}");
             }
             else if (fallbackState == PatchState.OutOfDate)
-                PrintYellow($"Fallback:   {fallbackLabel}");
+                PrintYellow($"Fallback:              {fallbackLabel}");
             else
-                PrintRed($"Fallback:   {fallbackLabel}");
+                PrintRed($"Fallback:              {fallbackLabel}");
 
             var stState = patcher.GetSteamToolsExePatchState();
             if (stState >= 0)
