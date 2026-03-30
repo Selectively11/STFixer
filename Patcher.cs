@@ -5,6 +5,7 @@ using System.IO.Compression;
 using System.Linq;
 using System.Net.Http;
 using System.Security.Cryptography;
+using Microsoft.Win32;
 
 namespace CloudFix
 {
@@ -588,6 +589,100 @@ namespace CloudFix
         public bool NeedsDllRepair()
         {
             return FindCoreDll() == null;
+        }
+
+        // SteamTools.exe deploys Core.dll -> xinput1_4.dll on every startup,
+        // overwriting our core patches. Patch out DeployCoreToSteamDir (file
+        // offset 0x282F0: push rbp -> ret) so it never runs.
+        const int StExePatchOffset = 0x282F0;
+        static readonly byte[] StExeOriginal = { 0x40, 0x55 }; // REX push rbp
+        static readonly byte[] StExePatched  = { 0xC3, 0x90 }; // ret nop
+
+        static string FindSteamToolsExe()
+        {
+            try
+            {
+                using var key = Registry.CurrentUser.OpenSubKey(@"Software\Valve\Steamtools");
+                var raw = key?.GetValue("SteamPath") as string;
+                if (raw == null) return null;
+                var path = Path.Combine(raw.Replace('/', '\\'), "SteamTools.exe");
+                return File.Exists(path) ? path : null;
+            }
+            catch { return null; }
+        }
+
+        // 0 = already patched, 1 = needs patch, -1 = not found / unrecognized
+        public int GetSteamToolsExePatchState()
+        {
+            var exe = FindSteamToolsExe();
+            if (exe == null) return -1;
+
+            try
+            {
+                var data = ReadFileShared(exe);
+                if (data.Length < StExePatchOffset + 2) return -1;
+
+                if (data[StExePatchOffset] == StExePatched[0]
+                    && data[StExePatchOffset + 1] == StExePatched[1])
+                    return 0;
+
+                if (data[StExePatchOffset] == StExeOriginal[0]
+                    && data[StExePatchOffset + 1] == StExeOriginal[1])
+                    return 1;
+
+                return -1; // unknown bytes
+            }
+            catch { return -1; }
+        }
+
+        public bool PatchSteamToolsExe()
+        {
+            var exe = FindSteamToolsExe();
+            if (exe == null)
+            {
+                Log("  SteamTools.exe not found");
+                return false;
+            }
+
+            try
+            {
+                var data = ReadFileShared(exe);
+                if (data.Length < StExePatchOffset + 2)
+                {
+                    Log("  SteamTools.exe too small - unrecognized version");
+                    return false;
+                }
+
+                if (data[StExePatchOffset] == StExePatched[0]
+                    && data[StExePatchOffset + 1] == StExePatched[1])
+                {
+                    Log("  SteamTools.exe: already patched");
+                    return true;
+                }
+
+                if (data[StExePatchOffset] != StExeOriginal[0]
+                    || data[StExePatchOffset + 1] != StExeOriginal[1])
+                {
+                    Log($"  SteamTools.exe: unexpected bytes at patch site ({data[StExePatchOffset]:X2} {data[StExePatchOffset + 1]:X2}) - unrecognized version");
+                    return false;
+                }
+
+                data[StExePatchOffset] = StExePatched[0];
+                data[StExePatchOffset + 1] = StExePatched[1];
+                File.WriteAllBytes(exe, data);
+                Log("  SteamTools.exe: patched (DLL deploy disabled)");
+                return true;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                Log("  SteamTools.exe: access denied - run as administrator");
+                return false;
+            }
+            catch (IOException ex)
+            {
+                Log($"  SteamTools.exe: {ex.Message}");
+                return false;
+            }
         }
 
         public PatchResult RepairDlls()

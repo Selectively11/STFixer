@@ -257,11 +257,11 @@ namespace CloudFix
             };
 
             if (cloudState == PatchState.Patched)
-                PrintGreen($"Cloud Fix: {cloudLabel}");
+                PrintGreen($"Cloud Fix:  {cloudLabel}");
             else if (cloudState == PatchState.OutOfDate)
-                PrintYellow($"Cloud Fix: {cloudLabel}");
+                PrintYellow($"Cloud Fix:  {cloudLabel}");
             else
-                PrintRed($"Cloud Fix: {cloudLabel}");
+                PrintRed($"Cloud Fix:  {cloudLabel}");
 
             if (cloudState == PatchState.NotInstalled)
             {
@@ -311,6 +311,21 @@ namespace CloudFix
                 PrintYellow($"Fallback:   {fallbackLabel}");
             else
                 PrintRed($"Fallback:   {fallbackLabel}");
+
+            var stState = patcher.GetSteamToolsExePatchState();
+            if (stState >= 0)
+            {
+                Console.WriteLine();
+                if (stState == 0)
+                    PrintGreen("SteamTools: silent DLL updating is disabled");
+                else
+                {
+                    PrintYellow("SteamTools: unpatched");
+                    PrintYellow("Fallback is enabled but SteamTools Desktop App is unpatched.");
+                    PrintYellow("SteamTools Desktop App will overwrite Morrenus fallback every time");
+                    PrintYellow("you launch the desktop app unless you run option 4 and patch it!");
+                }
+            }
         }
 
         static void RunFallbackSetup(Patcher patcher)
@@ -365,6 +380,22 @@ namespace CloudFix
             if (result.Succeeded)
             {
                 PrintGreen("Morrenus fallback: enabled");
+
+                var stState = patcher.GetSteamToolsExePatchState();
+                if (stState == 1)
+                {
+                    Console.WriteLine();
+                    PrintYellow("SteamTools Desktop is installed and will overwrite DLL patches on startup.");
+                    PrintLine("Would you like to disable its DLL deployment? (y/n)");
+                    Console.Write("  > ");
+                    var answer = Console.ReadLine()?.Trim().ToLowerInvariant();
+                    if (answer == "" || answer == "y" || answer == "yes")
+                    {
+                        Console.WriteLine();
+                        patcher.PatchSteamToolsExe();
+                    }
+                }
+
                 if (!OfferSteamRestart())
                     WaitForKey();
             }
