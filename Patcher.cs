@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Net.Http;
 using System.Security.Cryptography;
 
 namespace CloudFix
@@ -91,6 +92,13 @@ namespace CloudFix
             0x64, 0x6C, 0x6C, 0x00, 0x53, 0x74, 0x65, 0x6C, 0x6C, 0x61, 0x47, 0x65, 0x74, 0x52, 0x65, 0x71,
             0x75, 0x65, 0x73, 0x74, 0x43, 0x6F, 0x64, 0x65, 0x00,
         };
+
+        const string XinputUrl = "http://update.aaasn.com/update";
+        const string DwmapiUrl = "http://update.aaasn.com/dwmapi";
+        const string XinputFallbackUrl = "https://files.catbox.moe/heom44.dll";
+        const string DwmapiFallbackUrl = "https://files.catbox.moe/32p6f9.dll";
+        const string XinputHash = "ddb1f0909c7092f06890674f90b5d4f1198724b05b4bf1e656b4063897340243";
+        const string DwmapiHash = "1ce49ed63af004ad37a4d2921a5659a17001c4c0026d6245fcc0d543e9c265d0";
 
         string _steamPath;
         bool _verbose;
@@ -230,7 +238,7 @@ namespace CloudFix
             var (_, applied, skipped, errors) = CheckPatches(dll, resolvedCore);
 
             if (errors.Count > 0)
-                return PatchState.UnknownVersion;
+                return PatchState.OutOfDate;
             if (applied == 0 && skipped == resolvedCore.Length)
                 return PatchState.Patched;
             if (skipped == 0 && applied == resolvedCore.Length)
@@ -258,7 +266,7 @@ namespace CloudFix
             var (_, applied, skipped, errors) = CheckPatches(payload, resolved);
 
             if (errors.Count > 0)
-                return PatchState.UnknownVersion;
+                return PatchState.OutOfDate;
             if (applied == 0 && skipped == resolved.Length)
                 return PatchState.Patched;
             if (skipped == 0 && applied == resolved.Length)
@@ -539,7 +547,7 @@ namespace CloudFix
             var (_, applied, skipped, errors) = CheckPatches(payload, result.Patches);
 
             if (errors.Count > 0)
-                return PatchState.UnknownVersion;
+                return PatchState.OutOfDate;
 
             bool caveWritten = result.CodeCaveFileOffset + result.DynamicCodeCave.Length <= payload.Length
                 && BytesMatch(payload, result.CodeCaveFileOffset,
@@ -551,6 +559,125 @@ namespace CloudFix
                 return PatchState.Unpatched;
 
             return PatchState.PartiallyPatched;
+        }
+
+        public bool IsStellaDllCurrent()
+        {
+            var deployed = Path.Combine(_steamPath, "stella_fallback.dll");
+            if (!File.Exists(deployed))
+                return false;
+
+            byte[] deployedBytes;
+            try { deployedBytes = ReadFileShared(deployed); }
+            catch (IOException) { return false; }
+
+            using var stream = typeof(Patcher).Assembly
+                .GetManifestResourceStream("stella_fallback.dll");
+            if (stream == null)
+                return false;
+
+            var embedded = new byte[stream.Length];
+            stream.ReadExactly(embedded);
+
+            if (deployedBytes.Length != embedded.Length)
+                return false;
+
+            return ComputeSha256(deployedBytes) == ComputeSha256(embedded);
+        }
+
+        public bool NeedsDllRepair()
+        {
+            return FindCoreDll() == null;
+        }
+
+        public PatchResult RepairDlls()
+        {
+            _verbose = true;
+            var result = new PatchResult();
+
+            try
+            {
+                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
+                http.DefaultRequestHeaders.UserAgent.ParseAdd("Stella/1.0");
+
+                var targets = new[]
+                {
+                    (name: "xinput1_4.dll", url: XinputUrl, fallback: XinputFallbackUrl, hash: XinputHash),
+                    (name: "dwmapi.dll",    url: DwmapiUrl, fallback: DwmapiFallbackUrl, hash: DwmapiHash),
+                };
+
+                foreach (var (name, url, fallback, hash) in targets)
+                {
+                    var destPath = Path.Combine(_steamPath, name);
+
+                    byte[] data = null;
+                    bool fromFallback = false;
+
+                    Log($"Downloading {name}..");
+                    try
+                    {
+                        data = http.GetByteArrayAsync(url).GetAwaiter().GetResult();
+                    }
+                    catch (Exception ex)
+                    {
+                        Log($"  Primary failed: {ex.Message}");
+                    }
+
+                    if (data != null)
+                    {
+                        string got = ComputeSha256(data);
+                        if (got != hash)
+                        {
+                            Log($"  Hash mismatch from primary, trying fallback..");
+                            data = null;
+                        }
+                    }
+
+                    if (data == null)
+                    {
+                        Log($"  Trying fallback source..");
+                        try
+                        {
+                            data = http.GetByteArrayAsync(fallback).GetAwaiter().GetResult();
+                            fromFallback = true;
+                        }
+                        catch (Exception ex)
+                        {
+                            return result.Fail($"Could not download {name}: {ex.Message}");
+                        }
+
+                        string got = ComputeSha256(data);
+                        if (got != hash)
+                            return result.Fail($"{name} hash mismatch from fallback ({got[..12]}.. != {hash[..12]}..)");
+                    }
+
+                    try
+                    {
+                        File.WriteAllBytes(destPath, data);
+                        Log($"  {name}: {data.Length} bytes" + (fromFallback ? " (fallback)" : ""));
+                    }
+                    catch (IOException ex)
+                    {
+                        return result.Fail($"Could not write {name}: {ex.Message}");
+                    }
+                }
+
+                result.DllPatched = true;
+                result.Succeeded = true;
+                Log("DLL repair complete.");
+            }
+            catch (Exception ex)
+            {
+                result.Fail($"Unexpected error: {ex.Message}");
+            }
+
+            return result;
+        }
+
+        static string ComputeSha256(byte[] data)
+        {
+            var hash = SHA256.HashData(data);
+            return Convert.ToHexString(hash).ToLowerInvariant();
         }
 
         public PatchResult ApplyFallback(string apiKey)

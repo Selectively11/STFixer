@@ -21,6 +21,7 @@ static char g_api_key[MAX_KEY_LEN];
 static int  g_key_loaded = 0;
 static char g_log_path[MAX_PATH];
 static int  g_log_init = 0;
+static int  g_auth_warned = 0;
 
 static void init_log_path(void)
 {
@@ -256,6 +257,18 @@ __declspec(dllexport) unsigned __int64 __fastcall StellaGetRequestCode(
                         &status_code, &status_size, WINHTTP_NO_HEADER_INDEX);
 
     dbglog("HTTP %lu", status_code);
+
+    if (status_code == 401 && !g_auth_warned)
+    {
+        g_auth_warned = 1;
+        dbglog("API key expired or invalid");
+        MessageBoxA(NULL,
+            "Your Morrenus API key is expired or invalid.\n"
+            "Manifest downloads will fail until you update it.\n\n"
+            "Get a new API key and run CloudFix again to update it.",
+            "STFixer", MB_OK | MB_ICONWARNING | MB_SYSTEMMODAL);
+        goto cleanup;
+    }
 
     if (status_code != 200)
     {

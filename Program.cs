@@ -108,7 +108,9 @@ namespace CloudFix
                 Console.WriteLine("  3. Disable (restore originals)");
                 Console.WriteLine("  4. Enable Morrenus fallback");
                 Console.WriteLine("  5. Test Morrenus API");
-                Console.WriteLine("  6. Exit");
+                Console.WriteLine("  6. Update API key");
+                Console.WriteLine("  7. Repair SteamTools DLLs");
+                Console.WriteLine("  8. Exit");
                 Console.WriteLine();
                 Console.Write("  > ");
 
@@ -125,6 +127,8 @@ namespace CloudFix
                         PrintSep();
                         Console.WriteLine();
                         var setupResult = patcher.ApplyOfflineSetup();
+                        if (!setupResult.Succeeded && patcher.NeedsDllRepair() && OfferDllRepair(patcher))
+                            setupResult = patcher.ApplyOfflineSetup();
                         Console.WriteLine();
                         if (setupResult.Succeeded)
                         {
@@ -146,6 +150,8 @@ namespace CloudFix
                         PrintSep();
                         Console.WriteLine();
                         var applyResult = patcher.Apply();
+                        if (!applyResult.Succeeded && patcher.NeedsDllRepair() && OfferDllRepair(patcher))
+                            applyResult = patcher.Apply();
                         Console.WriteLine();
                         if (applyResult.Succeeded)
                         {
@@ -200,6 +206,24 @@ namespace CloudFix
                         break;
 
                     case '6':
+                        ClearScreen();
+                        PrintHeader();
+                        PrintLine($"Steam: {_steamPath}");
+                        PrintSep();
+                        Console.WriteLine();
+                        RunUpdateApiKey();
+                        break;
+
+                    case '7':
+                        ClearScreen();
+                        PrintHeader();
+                        PrintLine($"Steam: {_steamPath}");
+                        PrintSep();
+                        Console.WriteLine();
+                        RunDllRepair(patcher);
+                        break;
+
+                    case '8':
                         return;
                 }
             }
@@ -213,6 +237,7 @@ namespace CloudFix
                 PatchState.NotInstalled => "SteamTools not detected",
                 PatchState.Unpatched => "not patched",
                 PatchState.Patched => "patched",
+                PatchState.OutOfDate => "out of date",
                 PatchState.PartiallyPatched => "partially patched",
                 PatchState.UnknownVersion => "unknown SteamTools version",
                 _ => "unknown"
@@ -220,17 +245,23 @@ namespace CloudFix
 
             if (cloudState == PatchState.Patched)
                 PrintGreen($"Cloud Fix: {cloudLabel}");
+            else if (cloudState == PatchState.OutOfDate)
+                PrintYellow($"Cloud Fix: {cloudLabel}");
             else
                 PrintRed($"Cloud Fix: {cloudLabel}");
 
             if (cloudState == PatchState.NotInstalled)
+            {
+                PrintLine("  Use option 7 to download SteamTools DLLs");
                 return;
+            }
 
             var offlineState = patcher.GetOfflinePatchState();
             string offlineLabel = offlineState switch
             {
                 PatchState.Unpatched => "not patched",
                 PatchState.Patched => "patched",
+                PatchState.OutOfDate => "out of date",
                 PatchState.PartiallyPatched => "partially patched",
                 PatchState.UnknownVersion => "unknown payload version",
                 PatchState.NotInstalled => "payload not found",
@@ -239,6 +270,8 @@ namespace CloudFix
 
             if (offlineState == PatchState.Patched)
                 PrintGreen($"Offline:    {offlineLabel}");
+            else if (offlineState == PatchState.OutOfDate)
+                PrintYellow($"Offline:    {offlineLabel}");
             else
                 PrintRed($"Offline:    {offlineLabel}");
 
@@ -255,7 +288,12 @@ namespace CloudFix
             };
 
             if (fallbackState == PatchState.Patched)
-                PrintGreen($"Fallback:   {fallbackLabel}");
+            {
+                if (!patcher.IsStellaDllCurrent())
+                    PrintYellow($"Fallback:   {fallbackLabel} (DLL outdated)");
+                else
+                    PrintGreen($"Fallback:   {fallbackLabel}");
+            }
             else if (fallbackState == PatchState.OutOfDate)
                 PrintYellow($"Fallback:   {fallbackLabel}");
             else
@@ -264,23 +302,48 @@ namespace CloudFix
 
         static void RunFallbackSetup(Patcher patcher)
         {
+            if (patcher.NeedsDllRepair())
+            {
+                if (!OfferDllRepair(patcher))
+                {
+                    WaitForKey();
+                    return;
+                }
+            }
+
             string apiKey = null;
             var cfgPath = Path.Combine(_steamPath, "stella.cfg");
 
             if (File.Exists(cfgPath))
             {
-                PrintLine("stella.cfg found, using existing API key.");
-            }
-            else
-            {
-                PrintLine("Enter your Morrenus API key:");
-                Console.Write("  > ");
-                apiKey = Console.ReadLine()?.Trim();
-                if (string.IsNullOrWhiteSpace(apiKey))
+                var existing = File.ReadAllText(cfgPath).Trim();
+                if (IsValidApiKey(existing))
                 {
-                    PrintRed("No API key provided.");
-                    WaitForKey();
-                    return;
+                    PrintLine("stella.cfg found, using existing API key.");
+                }
+                else
+                {
+                    PrintRed("stella.cfg exists but key is invalid.");
+                    File.Delete(cfgPath);
+                }
+            }
+
+            if (!File.Exists(cfgPath))
+            {
+                while (true)
+                {
+                    PrintLine("Enter your Morrenus API key (or leave blank to cancel):");
+                    Console.Write("  > ");
+                    apiKey = Console.ReadLine()?.Trim();
+
+                    if (string.IsNullOrWhiteSpace(apiKey))
+                        return;
+
+                    if (IsValidApiKey(apiKey))
+                        break;
+
+                    PrintRed("Invalid key. Make sure you are copying the key correctly.");
+                    Console.WriteLine();
                 }
             }
 
@@ -445,6 +508,126 @@ namespace CloudFix
             }
 
             WaitForKey();
+        }
+
+        static void RunDllRepair(Patcher patcher)
+        {
+            if (!patcher.NeedsDllRepair())
+            {
+                PrintGreen("SteamTools DLLs are present, no repair needed.");
+                WaitForKey();
+                return;
+            }
+
+            PrintLine("SteamTools DLLs (xinput1_4.dll / dwmapi.dll) are missing or corrupted.");
+            PrintLine("This will download fresh copies from the SteamTools server and verify their integrity.");
+            Console.WriteLine();
+            Console.Write("  Proceed? [Y/n] ");
+            var key = Console.ReadKey(true);
+            Console.WriteLine(key.KeyChar);
+            Console.WriteLine();
+
+            if (key.KeyChar is 'n' or 'N')
+                return;
+
+            var result = patcher.RepairDlls();
+            Console.WriteLine();
+            if (result.Succeeded)
+                PrintGreen("DLLs repaired successfully.");
+            else
+                PrintRed($"Repair failed: {result.Error}");
+
+            WaitForKey();
+        }
+
+        static void RunUpdateApiKey()
+        {
+            var cfgPath = Path.Combine(_steamPath, "stella.cfg");
+
+            if (File.Exists(cfgPath))
+            {
+                try
+                {
+                    var existing = File.ReadAllText(cfgPath).Trim();
+                    if (existing.Length > 8)
+                        PrintLine($"Current key: {existing[..4]}...{existing[^4..]}");
+                    else if (existing.Length > 0)
+                        PrintLine($"Current key: {existing}");
+                }
+                catch { }
+            }
+            else
+            {
+                PrintLine("No API key configured.");
+            }
+
+            Console.WriteLine();
+            string newKey;
+            while (true)
+            {
+                PrintLine("Enter new Morrenus API key (or leave blank to cancel):");
+                Console.Write("  > ");
+                newKey = Console.ReadLine()?.Trim();
+
+                if (string.IsNullOrWhiteSpace(newKey))
+                    return;
+
+                if (IsValidApiKey(newKey))
+                    break;
+
+                PrintRed("Invalid key. Make sure you are copying the key correctly.");
+                Console.WriteLine();
+            }
+
+            try
+            {
+                File.WriteAllText(cfgPath, newKey);
+                PrintGreen("API key saved to stella.cfg");
+            }
+            catch (Exception ex)
+            {
+                PrintRed($"Could not write stella.cfg: {ex.Message}");
+            }
+
+            WaitForKey();
+        }
+
+        static bool OfferDllRepair(Patcher patcher)
+        {
+            PrintRed("SteamTools Core DLL not found.");
+            Console.WriteLine();
+            Console.Write("  Download and install SteamTools DLLs? [Y/n] ");
+            var key = Console.ReadKey(true);
+            Console.WriteLine(key.KeyChar);
+            Console.WriteLine();
+
+            if (key.KeyChar is 'n' or 'N')
+                return false;
+
+            var result = patcher.RepairDlls();
+            Console.WriteLine();
+            if (result.Succeeded)
+            {
+                PrintGreen("DLLs installed. Retrying..");
+                Console.WriteLine();
+                return true;
+            }
+
+            PrintRed($"Repair failed: {result.Error}");
+            return false;
+        }
+
+        static bool IsValidApiKey(string key)
+        {
+            if (key.Length != 100 || !key.StartsWith("smm_"))
+                return false;
+            for (int i = 4; i < key.Length; i++)
+            {
+                char c = key[i];
+                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+                    return false;
+            }
+            return true;
         }
 
         static string DetectSteamPath()
