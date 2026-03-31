@@ -107,7 +107,7 @@ namespace CloudFix
                 Console.WriteLine();
                 PrintMenuItem("1. Setup SteamTools Offline", "makes new SteamTools installations work if servers are down");
                 PrintMenuItem("2. Capcom Game Save Fix", "fixes games that will not create saves");
-                PrintMenuItem("3. This space intentionally left blank", null);
+                PrintMenuItem("3. Cloud Save Redirect", "redirect cloud saves to local folder for a specific game");
                 var fallbackColor = patcher.GetFallbackPatchState() == PatchState.Patched
                     ? ConsoleColor.White : ConsoleColor.Cyan;
                 PrintMenuItem("4. Enable Morrenus fallback", "fixes \"No Internet Connection\" error", fallbackColor);
@@ -202,6 +202,12 @@ namespace CloudFix
                         break;
 
                     case '3':
+                        ClearScreen();
+                        PrintHeader();
+                        PrintLine($"Steam: {_steamPath}");
+                        PrintSep();
+                        Console.WriteLine();
+                        RunCloudRedirectSetup(patcher);
                         break;
 
                     case '4':
@@ -440,6 +446,78 @@ namespace CloudFix
                 {
                     PrintYellow("API key:               could not verify (network error)");
                 }
+            }
+        }
+
+        static void RunCloudRedirectSetup(Patcher patcher)
+        {
+            PrintLine("Cloud Save Redirect intercepts Steam Cloud RPCs for a single game");
+            PrintLine("and redirects all cloud save operations to a local folder.");
+            PrintLine("This makes cloud saves work for games where SteamTools broke them.");
+            Console.WriteLine();
+
+            // check if cloud_redirect.dll is next to the exe
+            var dllPath = Path.Combine(AppContext.BaseDirectory, "cloud_redirect.dll");
+            if (!File.Exists(dllPath))
+            {
+                PrintRed("cloud_redirect.dll not found next to STFixer.exe.");
+                PrintRed("Place cloud_redirect.dll in the same folder and try again.");
+                WaitForKey();
+                return;
+            }
+
+            // check current state
+            var state = patcher.GetCloudRedirectPatchState();
+            if (state == PatchState.Patched)
+            {
+                PrintGreen("CloudRedirect is already active.");
+                Console.Write("  Reconfigure with a different AppID? [y/N] ");
+                var rc = Console.ReadKey(true);
+                Console.WriteLine(rc.KeyChar);
+                Console.WriteLine();
+                if (rc.KeyChar is not ('y' or 'Y'))
+                {
+                    WaitForKey();
+                    return;
+                }
+            }
+
+            Console.Write("  Enter the game's AppID: ");
+            var input = Console.ReadLine()?.Trim();
+            if (string.IsNullOrWhiteSpace(input) || !uint.TryParse(input, out var appId) || appId == 0)
+            {
+                PrintRed("Invalid AppID.");
+                WaitForKey();
+                return;
+            }
+
+            Console.WriteLine();
+            PrintLine($"This will redirect cloud saves for AppID {appId} to:");
+            PrintLine($"  C:\\CloudRedirect\\saves\\");
+            Console.WriteLine();
+            Console.Write("  Continue? [Y/n] ");
+            var confirm = Console.ReadKey(true);
+            Console.WriteLine(confirm.KeyChar);
+            Console.WriteLine();
+            if (confirm.KeyChar is 'n' or 'N')
+                return;
+
+            var result = patcher.ApplyCloudRedirect(appId);
+            if (!result.Succeeded && IsWrongVersionError(result.Error) && OfferDllReplace(patcher))
+                result = patcher.ApplyCloudRedirect(appId);
+            Console.WriteLine();
+            if (result.Succeeded)
+            {
+                PrintGreen($"CloudRedirect: enabled for AppID {appId}");
+                PrintLine($"  Saves will be stored in C:\\CloudRedirect\\saves\\");
+                PrintLine($"  Logs will be written to C:\\CloudRedirect\\cloud_redirect.log");
+                if (!OfferSteamRestart())
+                    WaitForKey();
+            }
+            else
+            {
+                PrintRed($"Error: {result.Error}");
+                WaitForKey();
             }
         }
 

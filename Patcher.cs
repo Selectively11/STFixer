@@ -18,6 +18,13 @@ namespace CloudFix
             public int CodeCaveFileOffset;
         }
 
+        class CloudRedirectResolveResult
+        {
+            public PatchEntry[] Patches;
+            public byte[] DynamicCodeCave;
+            public int CodeCaveFileOffset;
+        }
+
         static readonly string[] HijackCandidates = { "xinput1_4.dll", "dwmapi.dll" };
 
         static readonly byte[] AesKey =
@@ -92,6 +99,72 @@ namespace CloudFix
             0x73, 0x74, 0x65, 0x6C, 0x6C, 0x61, 0x5F, 0x66, 0x61, 0x6C, 0x6C, 0x62, 0x61, 0x63, 0x6B, 0x2E,
             0x64, 0x6C, 0x6C, 0x00, 0x53, 0x74, 0x65, 0x6C, 0x6C, 0x61, 0x47, 0x65, 0x74, 0x52, 0x65, 0x71,
             0x75, 0x65, 0x73, 0x74, 0x43, 0x6F, 0x64, 0x65, 0x00,
+        };
+
+        // cloud redirect code cave: in .Y_H section at file offset 0x1F3EEA (278 bytes available)
+        // overwrites first 5 bytes of sub_18000DB50 (SendPkt hook) with JMP to cave entry
+        const int CloudRedirectCaveFileOffset = 0x1F3EEA;
+        const int SendPktHookFileOffset = 0xCF50; // sub_18000DB50 in .text
+
+        static readonly byte[] CloudRedirectCaveContent =
+        {
+            // [0x00-0x17] register storage area (rcx, rdx, r8)
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            // [0x18] ENTRY: save registers
+            0x48, 0x89, 0x0D, 0xE1, 0xFF, 0xFF, 0xFF,       // mov [rip-0x1F], rcx  -> storage[0x00]
+            0x48, 0x89, 0x15, 0xE2, 0xFF, 0xFF, 0xFF,        // mov [rip-0x1E], rdx  -> storage[0x08]
+            0x4C, 0x89, 0x05, 0xE3, 0xFF, 0xFF, 0xFF,        // mov [rip-0x1D], r8   -> storage[0x10]
+            // push callee-saved regs + allocate shadow space
+            0x53,                                             // push rbx
+            0x57,                                             // push rdi
+            0x56,                                             // push rsi
+            0x48, 0x83, 0xEC, 0x28,                           // sub rsp, 0x28
+            // LoadLibrary("cloud_redirect.dll")
+            0x48, 0x8D, 0x0D, 0x60, 0x00, 0x00, 0x00,       // lea rcx, [rip+0x60]  -> "cloud_redirect.dll"
+            0xFF, 0x15, 0x00, 0x00, 0x00, 0x00,              // call [rip+XX]        -> LoadLibraryA IAT (fixup at cave+0x3D)
+            // check result
+            0x48, 0x85, 0xC0,                                 // test rax, rax
+            0x74, 0x3A,                                       // jz fallthrough (to cave+0x80)
+            // GetProcAddress(rax, "CloudOnSendPkt")
+            0x48, 0x8D, 0x15, 0x61, 0x00, 0x00, 0x00,       // lea rdx, [rip+0x61]  -> "CloudOnSendPkt"
+            0x48, 0x8B, 0xC8,                                 // mov rcx, rax
+            0xFF, 0x15, 0x00, 0x00, 0x00, 0x00,              // call [rip+XX]        -> GetProcAddress IAT (fixup at cave+0x52)
+            // check result
+            0x48, 0x85, 0xC0,                                 // test rax, rax
+            0x74, 0x25,                                       // jz fallthrough (to cave+0x80)
+            // call CloudOnSendPkt(thisptr, data, size, recvPktFn)
+            0x48, 0x8B, 0xD8,                                 // mov rbx, rax  (save fn ptr)
+            0x48, 0x8B, 0x0D, 0x9B, 0xFF, 0xFF, 0xFF,       // mov rcx, [rip-0x65]  -> storage[0x00] (thisptr)
+            0x48, 0x8B, 0x15, 0x9C, 0xFF, 0xFF, 0xFF,        // mov rdx, [rip-0x64]  -> storage[0x08] (data)
+            0x4C, 0x8B, 0x05, 0x9D, 0xFF, 0xFF, 0xFF,        // mov r8,  [rip-0x63]  -> storage[0x10] (size)
+            0x4C, 0x8B, 0x0D, 0x00, 0x00, 0x00, 0x00,       // mov r9,  [rip+XX]    -> qword_1801CAB20 (fixup at cave+0x76)
+            0xFF, 0xD3,                                       // call rbx
+            // check return value
+            0x85, 0xC0,                                       // test eax, eax
+            0x75, 0x11,                                       // jnz handled (to cave+0x91)
+            // [0x80] FALLTHROUGH: restore and execute original prologue
+            0x48, 0x83, 0xC4, 0x28,                           // add rsp, 0x28
+            0x5E,                                             // pop rsi
+            0x5F,                                             // pop rdi
+            0x5B,                                             // pop rbx
+            0x48, 0x89, 0x5C, 0x24, 0x20,                    // mov [rsp+20h], rbx  (original 5 bytes)
+            0xE9, 0x00, 0x00, 0x00, 0x00,                    // jmp SendPkt+5       (fixup at cave+0x8D)
+            // [0x91] HANDLED: clean up and return 0 (tells SteamTools handler "already processed")
+            0x48, 0x83, 0xC4, 0x28,                           // add rsp, 0x28
+            0x5E,                                             // pop rsi
+            0x5F,                                             // pop rdi
+            0x5B,                                             // pop rbx
+            0x31, 0xC0,                                       // xor eax, eax
+            0xC3,                                             // ret
+            // [0x9B] string data
+            0x63, 0x6C, 0x6F, 0x75, 0x64, 0x5F, 0x72, 0x65, // "cloud_re"
+            0x64, 0x69, 0x72, 0x65, 0x63, 0x74, 0x2E, 0x64, // "direct.d"
+            0x6C, 0x6C, 0x00,                                 // "ll\0"
+            // [0xAE] "CloudOnSendPkt\0"
+            0x43, 0x6C, 0x6F, 0x75, 0x64, 0x4F, 0x6E, 0x53,
+            0x65, 0x6E, 0x64, 0x50, 0x6B, 0x74, 0x00,
         };
 
         const string XinputUrl = "http://update.aaasn.com/update";
@@ -1238,6 +1311,31 @@ namespace CloudFix
             return cave;
         }
 
+        // build the cloud redirect code cave with correct relative offsets
+        static byte[] BuildDynamicCloudRedirectCave(int caveRva, int sendPktRva,
+            int loadLibAIatRva, int getProcAddrIatRva, int recvPktGlobalRva)
+        {
+            var cave = (byte[])CloudRedirectCaveContent.Clone();
+
+            // fixup 1: LoadLibraryA IAT call at cave+0x3D (relative to cave+0x41)
+            int loadLibDisp = loadLibAIatRva - (caveRva + 0x41);
+            BitConverter.TryWriteBytes(cave.AsSpan(0x3D, 4), loadLibDisp);
+
+            // fixup 2: GetProcAddress IAT call at cave+0x52 (relative to cave+0x56)
+            int getProcDisp = getProcAddrIatRva - (caveRva + 0x56);
+            BitConverter.TryWriteBytes(cave.AsSpan(0x52, 4), getProcDisp);
+
+            // fixup 3: RecvPkt global at cave+0x76 (relative to cave+0x7A)
+            int recvPktDisp = recvPktGlobalRva - (caveRva + 0x7A);
+            BitConverter.TryWriteBytes(cave.AsSpan(0x76, 4), recvPktDisp);
+
+            // fixup 4: JMP back to SendPkt+5 at cave+0x8D (relative to cave+0x91)
+            int jumpBackDisp = (sendPktRva + 5) - (caveRva + 0x91);
+            BitConverter.TryWriteBytes(cave.AsSpan(0x8D, 4), jumpBackDisp);
+
+            return cave;
+        }
+
         static bool BytesMatch(byte[] data, int dataOffset, byte[] pattern, int patOffset, int length)
         {
             if (dataOffset + length > data.Length) return false;
@@ -1634,6 +1732,263 @@ namespace CloudFix
                 DynamicCodeCave = dynamicCave,
                 CodeCaveFileOffset = caveFileOffset,
             };
+        }
+
+        CloudRedirectResolveResult ResolveCloudRedirectPatchOffsets(byte[] payload)
+        {
+            if (!ResolvePayloadSections(payload, out var sections, out int tStart, out int tEnd, out _, out _))
+                return null;
+
+            // locate SendPkt hook function (sub_18000DB50) at file offset 0xCF50
+            int sendPkt = SendPktHookFileOffset;
+            if (sendPkt + 5 > payload.Length)
+            {
+                Log("  Payload: SendPkt hook offset out of range");
+                return null;
+            }
+
+            // verify original prologue bytes: 48 89 5C 24 20
+            byte[] sendPktOriginal = { 0x48, 0x89, 0x5C, 0x24, 0x20 };
+            bool isOriginal = BytesMatch(payload, sendPkt, sendPktOriginal, 0, 5);
+            bool isAlreadyJmp = payload[sendPkt] == 0xE9;
+
+            if (!isOriginal && !isAlreadyJmp)
+            {
+                Log($"  Payload: unexpected bytes at SendPkt (0x{sendPkt:X}): {SafeHexDump(payload, sendPkt, 5)}");
+                return null;
+            }
+
+            // code cave location
+            int caveFileOffset = CloudRedirectCaveFileOffset;
+            if (caveFileOffset + CloudRedirectCaveContent.Length > payload.Length)
+            {
+                Log("  Payload: not enough space for cloud redirect cave");
+                return null;
+            }
+
+            // convert to RVAs
+            int sendPktRva = PeSection.FileOffsetToRva(sections, sendPkt);
+            int caveRva = PeSection.FileOffsetToRva(sections, caveFileOffset);
+
+            if (sendPktRva < 0 || caveRva < 0)
+            {
+                Log($"  Payload: RVA resolution failed (sendPkt={sendPktRva:X}, cave={caveRva:X})");
+                return null;
+            }
+
+            // validate cave is in a mapped section
+            var caveSec = PeSection.FindByFileOffset(sections, caveFileOffset);
+            if (caveSec == null)
+            {
+                Log($"  Payload: cave offset 0x{caveFileOffset:X} not within any PE section");
+                return null;
+            }
+
+            // find IAT entries
+            var (loadLibIatRva, getProcIatRva) = FindKernel32IatEntries(payload, sections);
+            if (loadLibIatRva < 0 || getProcIatRva < 0)
+            {
+                Log($"  Payload: KERNEL32 IAT not found (LoadLib={loadLibIatRva:X}, GetProc={getProcIatRva:X})");
+                return null;
+            }
+
+            // RecvPkt original function pointer is at qword_1801CAB20 (RVA 0x1CAB20)
+            int recvPktGlobalRva = 0x1CAB20;
+
+            // build JMP from SendPkt entry to cave entry (cave+0x18)
+            var sendPktOrig = new byte[5];
+            if (isOriginal)
+                Buffer.BlockCopy(payload, sendPkt, sendPktOrig, 0, 5);
+            else
+                Buffer.BlockCopy(sendPktOriginal, 0, sendPktOrig, 0, 5);
+
+            int jmpTarget = caveRva + 0x18;
+            int jmpDisp = jmpTarget - (sendPktRva + 5);
+            var sendPktRepl = new byte[5];
+            sendPktRepl[0] = 0xE9;
+            BitConverter.TryWriteBytes(sendPktRepl.AsSpan(1, 4), jmpDisp);
+
+            // build cave
+            var dynamicCave = BuildDynamicCloudRedirectCave(caveRva, sendPktRva,
+                loadLibIatRva, getProcIatRva, recvPktGlobalRva);
+
+            Log($"  CloudRedirect: SendPkt at file=0x{sendPkt:X} rva=0x{sendPktRva:X}");
+            Log($"  CloudRedirect: cave at file=0x{caveFileOffset:X} rva=0x{caveRva:X}");
+            Log($"  IAT: LoadLibraryA=0x{loadLibIatRva:X}, GetProcAddress=0x{getProcIatRva:X}");
+
+            return new CloudRedirectResolveResult
+            {
+                Patches = new PatchEntry[]
+                {
+                    new PatchEntry(sendPkt, sendPktOrig, sendPktRepl),
+                },
+                DynamicCodeCave = dynamicCave,
+                CodeCaveFileOffset = caveFileOffset,
+            };
+        }
+
+        public PatchState GetCloudRedirectPatchState()
+        {
+            _verbose = false;
+
+            var cachePath = Fingerprint.FindCachePath(_steamPath, verbose: false);
+            if (cachePath == null)
+                return PatchState.NotInstalled;
+
+            var payload = GetDecryptedPayload(cachePath);
+            if (payload == null)
+                return PatchState.UnknownVersion;
+
+            var result = ResolveCloudRedirectPatchOffsets(payload);
+            if (result == null)
+                return PatchState.UnknownVersion;
+
+            var (_, applied, skipped, errors) = CheckPatches(payload, result.Patches);
+
+            if (errors.Count > 0)
+                return PatchState.OutOfDate;
+
+            bool caveWritten = result.CodeCaveFileOffset + result.DynamicCodeCave.Length <= payload.Length
+                && BytesMatch(payload, result.CodeCaveFileOffset,
+                    result.DynamicCodeCave, 0, result.DynamicCodeCave.Length);
+
+            if (applied == 0 && skipped == result.Patches.Length)
+                return caveWritten ? PatchState.Patched : PatchState.OutOfDate;
+            if (skipped == 0 && applied == result.Patches.Length)
+                return PatchState.Unpatched;
+
+            return PatchState.PartiallyPatched;
+        }
+
+        string DeployCloudRedirect(uint appId)
+        {
+            var dllSrc = Path.Combine(AppContext.BaseDirectory, "cloud_redirect.dll");
+
+            if (!File.Exists(dllSrc))
+                return "cloud_redirect.dll not found next to STFixer.exe";
+
+            var dllDest = Path.Combine(_steamPath, "cloud_redirect.dll");
+            try
+            {
+                File.Copy(dllSrc, dllDest, overwrite: true);
+                Log($"  Deployed cloud_redirect.dll to {_steamPath}");
+            }
+            catch (IOException)
+            {
+                return "cloud_redirect.dll is in use (close Steam first)";
+            }
+
+            // write config file next to the DLL
+            var cfgDest = Path.Combine(_steamPath, "cloud_redirect.cfg");
+            var cfgContent = $"appid={appId}\nstorage_path=C:\\CloudRedirect\\saves\\\nlog_path=C:\\CloudRedirect\\cloud_redirect.log\n";
+            File.WriteAllText(cfgDest, cfgContent);
+            Log($"  Wrote cloud_redirect.cfg (appid={appId})");
+
+            // ensure storage directory exists
+            try { Directory.CreateDirectory("C:\\CloudRedirect\\saves"); }
+            catch { }
+
+            return null;
+        }
+
+        public PatchResult ApplyCloudRedirect(uint appId)
+        {
+            _verbose = true;
+            var result = new PatchResult();
+
+            try
+            {
+                // core DLL patches must be applied first (hash check bypass)
+                var hijackDll = FindCoreDll();
+                if (hijackDll == null)
+                    return result.Fail("SteamTools Core DLL not found. Is SteamTools installed?");
+
+                var dllPath = Path.Combine(_steamPath, hijackDll);
+                byte[] dllData;
+                try { dllData = ReadFileShared(dllPath); }
+                catch (IOException) { return result.Fail($"{hijackDll} is in use - close Steam first"); }
+
+                var resolvedCore = ResolveCorePatchOffsets(dllData);
+                if (resolvedCore == null)
+                    return result.Fail($"Could not identify patch locations in {hijackDll} - unsupported version?");
+
+                var (patchedDll, dllApplied, dllSkipped, dllErrors) = ApplyPatches(dllData, resolvedCore);
+                if (dllErrors.Count > 0)
+                {
+                    foreach (var err in dllErrors) Log(err);
+                    return result.Fail("Byte mismatch in " + hijackDll + " - wrong version?");
+                }
+
+                var cachePath = Fingerprint.FindCachePath(_steamPath);
+                if (cachePath == null)
+                {
+                    Log("Payload cache not found. Deploying embedded payload..");
+                    cachePath = DeployEmbeddedPayload();
+                    if (cachePath == null)
+                        return result.Fail("Could not deploy payload cache.");
+                }
+
+                Log("Patching payload (CloudRedirect)..");
+                Backup(cachePath);
+
+                var (payload, iv, plErr) = ReadAndDecryptPayload(cachePath);
+                if (payload == null)
+                    return result.Fail(plErr);
+
+                var resolved = ResolveCloudRedirectPatchOffsets(payload);
+                if (resolved == null)
+                    return result.Fail("Could not locate CloudRedirect patch sites in payload");
+
+                var (patchedPayload, plApplied, plSkipped, plErrors) = ApplyPatches(payload, resolved.Patches);
+                if (plErrors.Count > 0)
+                {
+                    foreach (var err in plErrors) Log(err);
+                    return result.Fail("Byte mismatch at CloudRedirect patch sites");
+                }
+
+                if (resolved.CodeCaveFileOffset + resolved.DynamicCodeCave.Length > patchedPayload.Length)
+                    return result.Fail("Payload too small for code cave injection");
+
+                bool caveAlready = BytesMatch(patchedPayload, resolved.CodeCaveFileOffset,
+                    resolved.DynamicCodeCave, 0, resolved.DynamicCodeCave.Length);
+
+                var deployErr = DeployCloudRedirect(appId);
+                if (deployErr != null)
+                    return result.Fail(deployErr);
+
+                // write core DLL patches
+                Backup(dllPath);
+                if (dllApplied > 0)
+                {
+                    File.WriteAllBytes(dllPath, patchedDll);
+                    Log($"  {dllApplied} core patch(es) applied to {hijackDll}");
+                }
+                result.DllPatched = true;
+
+                if (plApplied > 0 || !caveAlready)
+                {
+                    Buffer.BlockCopy(resolved.DynamicCodeCave, 0, patchedPayload,
+                        resolved.CodeCaveFileOffset, resolved.DynamicCodeCave.Length);
+                    ReEncryptAndWrite(cachePath, patchedPayload, iv);
+                    int total = plApplied + (caveAlready ? 0 : 1);
+                    Log($"  {total} change(s) applied" + (plSkipped > 0 ? $", {plSkipped} already done" : ""));
+                }
+                else
+                {
+                    Log("  Already patched");
+                }
+                result.CachePatched = true;
+
+                result.Succeeded = true;
+                Log("Done.");
+            }
+            catch (Exception ex)
+            {
+                result.Fail($"Unexpected error: {ex.Message}");
+                Log($"Error: {ex.Message}");
+            }
+
+            return result;
         }
     }
 }
