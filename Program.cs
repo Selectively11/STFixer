@@ -143,6 +143,8 @@ namespace CloudFix
                         if (offlineConfirm.KeyChar is 'n' or 'N')
                             break;
                         var setupResult = patcher.ApplyOfflineSetup();
+                        if (!setupResult.Succeeded && IsWrongVersionError(setupResult.Error) && OfferDllReplace(patcher))
+                            setupResult = patcher.ApplyOfflineSetup();
                         if (!setupResult.Succeeded && patcher.NeedsDllRepair() && OfferDllRepair(patcher))
                             setupResult = patcher.ApplyOfflineSetup();
                         Console.WriteLine();
@@ -181,6 +183,8 @@ namespace CloudFix
                         if (cloudConfirm.KeyChar is 'n' or 'N')
                             break;
                         var applyResult = patcher.Apply();
+                        if (!applyResult.Succeeded && IsWrongVersionError(applyResult.Error) && OfferDllReplace(patcher))
+                            applyResult = patcher.Apply();
                         if (!applyResult.Succeeded && patcher.NeedsDllRepair() && OfferDllRepair(patcher))
                             applyResult = patcher.Apply();
                         Console.WriteLine();
@@ -487,6 +491,8 @@ namespace CloudFix
             }
 
             var result = patcher.ApplyFallback(apiKey);
+            if (!result.Succeeded && IsWrongVersionError(result.Error) && OfferDllReplace(patcher))
+                result = patcher.ApplyFallback(apiKey);
             Console.WriteLine();
             if (result.Succeeded)
             {
@@ -671,15 +677,8 @@ namespace CloudFix
 
         static void RunDllRepair(Patcher patcher)
         {
-            if (!patcher.NeedsDllRepair())
-            {
-                PrintGreen("SteamTools DLLs are present, no repair needed.");
-                WaitForKey();
-                return;
-            }
-
-            PrintLine("SteamTools DLLs (xinput1_4.dll / dwmapi.dll) are missing or corrupted.");
-            PrintLine("This will download fresh copies from the SteamTools server and verify their integrity.");
+            PrintLine("This will download fresh SteamTools DLLs (xinput1_4.dll / dwmapi.dll)");
+            PrintLine("and replace any existing copies.");
             Console.WriteLine();
             Console.Write("  Proceed? [Y/n] ");
             var key = Console.ReadKey(true);
@@ -689,6 +688,7 @@ namespace CloudFix
             if (key.KeyChar is 'n' or 'N')
                 return;
 
+            DeleteCoreDlls();
             var result = patcher.RepairDlls();
             Console.WriteLine();
             if (result.Succeeded)
@@ -774,6 +774,47 @@ namespace CloudFix
 
             PrintRed($"Repair failed: {result.Error}");
             return false;
+        }
+
+        static bool IsWrongVersionError(string error)
+        {
+            return error != null && error.Contains("wrong version", StringComparison.OrdinalIgnoreCase);
+        }
+
+        static bool OfferDllReplace(Patcher patcher)
+        {
+            PrintRed("The DLL appears to be a different version than expected.");
+            Console.WriteLine();
+            Console.Write("  Delete and re-download SteamTools DLLs? [Y/n] ");
+            var key = Console.ReadKey(true);
+            Console.WriteLine(key.KeyChar);
+            Console.WriteLine();
+
+            if (key.KeyChar is 'n' or 'N')
+                return false;
+
+            DeleteCoreDlls();
+            var result = patcher.RepairDlls();
+            Console.WriteLine();
+            if (result.Succeeded)
+            {
+                PrintGreen("DLLs replaced. Retrying..");
+                Console.WriteLine();
+                return true;
+            }
+
+            PrintRed($"Repair failed: {result.Error}");
+            return false;
+        }
+
+        static void DeleteCoreDlls()
+        {
+            foreach (var name in new[] { "xinput1_4.dll", "dwmapi.dll" })
+            {
+                var path = Path.Combine(_steamPath, name);
+                try { if (File.Exists(path)) File.Delete(path); }
+                catch { }
+            }
         }
 
         static bool IsValidApiKey(string key)
