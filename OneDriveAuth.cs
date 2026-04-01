@@ -76,17 +76,34 @@ namespace CloudFix
 
         public static async Task<string> RunSignIn()
         {
-            var tcp = new TcpListener(IPAddress.Loopback, 0);
-            tcp.Start();
-            int port = ((IPEndPoint)tcp.LocalEndpoint).Port;
-            tcp.Stop();
+            // allocate a random port and start HttpListener on it.
+            // retry up to 5 times to avoid TOCTOU race on port allocation.
+            HttpListener listener = null;
+            string redirectUri = null;
+            for (int attempt = 0; attempt < 5; attempt++)
+            {
+                var tcp = new TcpListener(IPAddress.Loopback, 0);
+                tcp.Start();
+                int port = ((IPEndPoint)tcp.LocalEndpoint).Port;
+                tcp.Stop();
 
-            string redirectUri = $"http://localhost:{port}/";
+                redirectUri = $"http://localhost:{port}/";
+                listener = new HttpListener();
+                listener.Prefixes.Add(redirectUri);
+                try
+                {
+                    listener.Start();
+                    break;
+                }
+                catch (HttpListenerException) when (attempt < 4)
+                {
+                    listener = null;
+                }
+            }
+            if (listener == null)
+                return "Failed to allocate a local port for OAuth callback after 5 attempts";
+
             var (codeVerifier, codeChallenge) = GeneratePkce();
-
-            var listener = new HttpListener();
-            listener.Prefixes.Add(redirectUri);
-            listener.Start();
 
             try
             {
@@ -197,7 +214,11 @@ namespace CloudFix
 
         static string EscapeJson(string s)
         {
-            return s.Replace("\\", "\\\\").Replace("\"", "\\\"");
+            return s.Replace("\\", "\\\\")
+                    .Replace("\"", "\\\"")
+                    .Replace("\n", "\\n")
+                    .Replace("\r", "\\r")
+                    .Replace("\t", "\\t");
         }
     }
 }
