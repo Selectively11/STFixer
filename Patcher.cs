@@ -108,61 +108,59 @@ namespace CloudFix
 
         static readonly byte[] CloudRedirectCaveContent =
         {
-            // [0x00-0x17] register storage area (rcx, rdx, r8)
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            // [0x18] ENTRY: save registers
-            0x48, 0x89, 0x0D, 0xE1, 0xFF, 0xFF, 0xFF,       // mov [rip-0x1F], rcx  -> storage[0x00]
-            0x48, 0x89, 0x15, 0xE2, 0xFF, 0xFF, 0xFF,        // mov [rip-0x1E], rdx  -> storage[0x08]
-            0x4C, 0x89, 0x05, 0xE3, 0xFF, 0xFF, 0xFF,        // mov [rip-0x1D], r8   -> storage[0x10]
-            // push callee-saved regs + allocate shadow space
+            // [0x00] ENTRY: save volatile regs + rbx on stack (no RIP-relative writes)
+            0x51,                                             // push rcx
+            0x52,                                             // push rdx
+            0x41, 0x50,                                       // push r8
             0x53,                                             // push rbx
-            0x57,                                             // push rdi
-            0x56,                                             // push rsi
             0x48, 0x83, 0xEC, 0x28,                           // sub rsp, 0x28
+            // 4 pushes (32) + 0x28 (40) = 72 from entry. entry RSP = caller-8. total = caller-80. aligned.
             // LoadLibrary("cloud_redirect.dll")
-            0x48, 0x8D, 0x0D, 0x60, 0x00, 0x00, 0x00,       // lea rcx, [rip+0x60]  -> "cloud_redirect.dll"
-            0xFF, 0x15, 0x00, 0x00, 0x00, 0x00,              // call [rip+XX]        -> LoadLibraryA IAT (fixup at cave+0x3D)
+            0x48, 0x8D, 0x0D, 0x5E, 0x00, 0x00, 0x00,       // lea rcx, [rip+0x5E]  -> "cloud_redirect.dll" (0x6E)
+            0xFF, 0x15, 0x00, 0x00, 0x00, 0x00,              // call [rip+XX]        -> LoadLibraryA IAT (fixup at cave+0x12)
             // check result
             0x48, 0x85, 0xC0,                                 // test rax, rax
-            0x74, 0x3A,                                       // jz fallthrough (to cave+0x80)
+            0x74, 0x34,                                       // jz fallthrough (to cave+0x4F)
             // GetProcAddress(rax, "CloudOnSendPkt")
-            0x48, 0x8D, 0x15, 0x61, 0x00, 0x00, 0x00,       // lea rdx, [rip+0x61]  -> "CloudOnSendPkt"
+            0x48, 0x8D, 0x15, 0x5F, 0x00, 0x00, 0x00,       // lea rdx, [rip+0x5F]  -> "CloudOnSendPkt" (0x81)
             0x48, 0x8B, 0xC8,                                 // mov rcx, rax
-            0xFF, 0x15, 0x00, 0x00, 0x00, 0x00,              // call [rip+XX]        -> GetProcAddress IAT (fixup at cave+0x52)
+            0xFF, 0x15, 0x00, 0x00, 0x00, 0x00,              // call [rip+XX]        -> GetProcAddress IAT (fixup at cave+0x27)
             // check result
             0x48, 0x85, 0xC0,                                 // test rax, rax
-            0x74, 0x25,                                       // jz fallthrough (to cave+0x80)
+            0x74, 0x1F,                                       // jz fallthrough (to cave+0x4F)
             // call CloudOnSendPkt(thisptr, data, size, recvPktFn)
             0x48, 0x8B, 0xD8,                                 // mov rbx, rax  (save fn ptr)
-            0x48, 0x8B, 0x0D, 0x9B, 0xFF, 0xFF, 0xFF,       // mov rcx, [rip-0x65]  -> storage[0x00] (thisptr)
-            0x48, 0x8B, 0x15, 0x9C, 0xFF, 0xFF, 0xFF,        // mov rdx, [rip-0x64]  -> storage[0x08] (data)
-            0x4C, 0x8B, 0x05, 0x9D, 0xFF, 0xFF, 0xFF,        // mov r8,  [rip-0x63]  -> storage[0x10] (size)
-            0x4C, 0x8B, 0x0D, 0x00, 0x00, 0x00, 0x00,       // mov r9,  [rip+XX]    -> qword_1801CAB20 (fixup at cave+0x76)
+            0x48, 0x8B, 0x4C, 0x24, 0x40,                    // mov rcx, [rsp+0x40]  (thisptr = push rcx)
+            0x48, 0x8B, 0x54, 0x24, 0x38,                    // mov rdx, [rsp+0x38]  (data = push rdx)
+            0x4C, 0x8B, 0x44, 0x24, 0x30,                    // mov r8,  [rsp+0x30]  (size = push r8)
+            0x4C, 0x8D, 0x0D, 0x00, 0x00, 0x00, 0x00,       // lea r9,  [rip+XX]    -> &qword_1801CAB48 (fixup at cave+0x45)
             0xFF, 0xD3,                                       // call rbx
             // check return value
             0x85, 0xC0,                                       // test eax, eax
-            0x75, 0x11,                                       // jnz handled (to cave+0x91)
-            // [0x80] FALLTHROUGH: restore and execute original prologue
+            0x75, 0x13,                                       // jnz handled (to cave+0x62)
+            // [0x4F] FALLTHROUGH: restore and execute original prologue
             0x48, 0x83, 0xC4, 0x28,                           // add rsp, 0x28
-            0x5E,                                             // pop rsi
-            0x5F,                                             // pop rdi
             0x5B,                                             // pop rbx
+            0x41, 0x58,                                       // pop r8
+            0x5A,                                             // pop rdx
+            0x59,                                             // pop rcx
             0x48, 0x89, 0x5C, 0x24, 0x20,                    // mov [rsp+20h], rbx  (original 5 bytes)
-            0xE9, 0x00, 0x00, 0x00, 0x00,                    // jmp SendPkt+5       (fixup at cave+0x8D)
-            // [0x91] HANDLED: clean up and return 0 (tells SteamTools handler "already processed")
+            0xE9, 0x00, 0x00, 0x00, 0x00,                    // jmp SendPkt+5       (fixup at cave+0x5E)
+            // [0x62] HANDLED: clean up and return 1 (success) to the SendPkt caller.
+            // The caller (BYieldingSendMessageAndGetReply) checks this as a bool:
+            // 0 = SendPkt failed (aborts immediately), non-zero = sent OK (yields for response).
             0x48, 0x83, 0xC4, 0x28,                           // add rsp, 0x28
-            0x5E,                                             // pop rsi
-            0x5F,                                             // pop rdi
             0x5B,                                             // pop rbx
-            0x31, 0xC0,                                       // xor eax, eax
+            0x41, 0x58,                                       // pop r8
+            0x5A,                                             // pop rdx
+            0x59,                                             // pop rcx
+            0xB0, 0x01,                                       // mov al, 1
             0xC3,                                             // ret
-            // [0x9B] string data
+            // [0x6E] string data
             0x63, 0x6C, 0x6F, 0x75, 0x64, 0x5F, 0x72, 0x65, // "cloud_re"
             0x64, 0x69, 0x72, 0x65, 0x63, 0x74, 0x2E, 0x64, // "direct.d"
             0x6C, 0x6C, 0x00,                                 // "ll\0"
-            // [0xAE] "CloudOnSendPkt\0"
+            // [0x81] "CloudOnSendPkt\0"
             0x43, 0x6C, 0x6F, 0x75, 0x64, 0x4F, 0x6E, 0x53,
             0x65, 0x6E, 0x64, 0x50, 0x6B, 0x74, 0x00,
         };
@@ -1317,21 +1315,21 @@ namespace CloudFix
         {
             var cave = (byte[])CloudRedirectCaveContent.Clone();
 
-            // fixup 1: LoadLibraryA IAT call at cave+0x3D (relative to cave+0x41)
-            int loadLibDisp = loadLibAIatRva - (caveRva + 0x41);
-            BitConverter.TryWriteBytes(cave.AsSpan(0x3D, 4), loadLibDisp);
+            // fixup 1: LoadLibraryA IAT call at cave+0x12 (relative to cave+0x16)
+            int loadLibDisp = loadLibAIatRva - (caveRva + 0x16);
+            BitConverter.TryWriteBytes(cave.AsSpan(0x12, 4), loadLibDisp);
 
-            // fixup 2: GetProcAddress IAT call at cave+0x52 (relative to cave+0x56)
-            int getProcDisp = getProcAddrIatRva - (caveRva + 0x56);
-            BitConverter.TryWriteBytes(cave.AsSpan(0x52, 4), getProcDisp);
+            // fixup 2: GetProcAddress IAT call at cave+0x27 (relative to cave+0x2B)
+            int getProcDisp = getProcAddrIatRva - (caveRva + 0x2B);
+            BitConverter.TryWriteBytes(cave.AsSpan(0x27, 4), getProcDisp);
 
-            // fixup 3: RecvPkt global at cave+0x76 (relative to cave+0x7A)
-            int recvPktDisp = recvPktGlobalRva - (caveRva + 0x7A);
-            BitConverter.TryWriteBytes(cave.AsSpan(0x76, 4), recvPktDisp);
+            // fixup 3: RecvPkt global at cave+0x45 (relative to cave+0x49)
+            int recvPktDisp = recvPktGlobalRva - (caveRva + 0x49);
+            BitConverter.TryWriteBytes(cave.AsSpan(0x45, 4), recvPktDisp);
 
-            // fixup 4: JMP back to SendPkt+5 at cave+0x8D (relative to cave+0x91)
-            int jumpBackDisp = (sendPktRva + 5) - (caveRva + 0x91);
-            BitConverter.TryWriteBytes(cave.AsSpan(0x8D, 4), jumpBackDisp);
+            // fixup 4: JMP back to SendPkt+5 at cave+0x5E (relative to cave+0x62)
+            int jumpBackDisp = (sendPktRva + 5) - (caveRva + 0x62);
+            BitConverter.TryWriteBytes(cave.AsSpan(0x5E, 4), jumpBackDisp);
 
             return cave;
         }
@@ -1792,17 +1790,20 @@ namespace CloudFix
                 return null;
             }
 
-            // RecvPkt original function pointer is at qword_1801CAB20 (RVA 0x1CAB20)
-            int recvPktGlobalRva = 0x1CAB20;
+            // RecvPkt vtable slot pointer at qword_1801CAB48 (RVA 0x1CAB48)
+            // code cave uses LEA to pass the ADDRESS of this global to the DLL.
+            // DLL dereferences once to get the vtable slot value (hook fn), and
+            // computes qword_1801CAB20 at -0x28 to hook the saved original RecvPkt.
+            int recvPktGlobalRva = 0x1CAB48;
 
-            // build JMP from SendPkt entry to cave entry (cave+0x18)
+            // build JMP from SendPkt entry to cave entry (cave+0x00, no storage prefix)
             var sendPktOrig = new byte[5];
             if (isOriginal)
                 Buffer.BlockCopy(payload, sendPkt, sendPktOrig, 0, 5);
             else
                 Buffer.BlockCopy(sendPktOriginal, 0, sendPktOrig, 0, 5);
 
-            int jmpTarget = caveRva + 0x18;
+            int jmpTarget = caveRva;
             int jmpDisp = jmpTarget - (sendPktRva + 5);
             var sendPktRepl = new byte[5];
             sendPktRepl[0] = 0xE9;
@@ -1816,12 +1817,14 @@ namespace CloudFix
             Log($"  CloudRedirect: cave at file=0x{caveFileOffset:X} rva=0x{caveRva:X}");
             Log($"  IAT: LoadLibraryA=0x{loadLibIatRva:X}, GetProcAddress=0x{getProcIatRva:X}");
 
+            var patches = new List<PatchEntry>
+            {
+                new PatchEntry(sendPkt, sendPktOrig, sendPktRepl),
+            };
+
             return new CloudRedirectResolveResult
             {
-                Patches = new PatchEntry[]
-                {
-                    new PatchEntry(sendPkt, sendPktOrig, sendPktRepl),
-                },
+                Patches = patches.ToArray(),
                 DynamicCodeCave = dynamicCave,
                 CodeCaveFileOffset = caveFileOffset,
             };
