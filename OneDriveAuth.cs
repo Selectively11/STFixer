@@ -5,20 +5,23 @@ using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Net.Sockets;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 
 namespace CloudFix
 {
-    // one-time Google Drive OAuth browser flow for CloudRedirect.
+    // one-time OneDrive OAuth browser flow for CloudRedirect.
     // the DLL handles token refresh -- this just gets the initial refresh_token.
-    internal static class GoogleDriveAuth
+    internal static class OneDriveAuth
     {
-        const string ClientId = "202264815644.apps.googleusercontent.com";
-        const string ClientSecret = "X4Z3ca8xfWDb1Voo-F9a7ZxJ";
-        const string Scope = "https://www.googleapis.com/auth/drive";
-        const string TokenExchangeUrl = "https://oauth2.googleapis.com/token";
+        // user registers their own Azure AD app — this is the Application (client) ID.
+        const string ClientId = "c582f799-5dc5-48a7-a4cd-cd0d8af354a2";
+        const string Scope = "Files.ReadWrite offline_access";
+        const string AuthEndpoint = "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize";
+        const string TokenEndpoint = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
 
         public const string TokenFilename = "tokens.json";
 
@@ -52,6 +55,25 @@ namespace CloudFix
             }
         }
 
+        // PKCE: generate a random code_verifier and derive code_challenge
+        static (string verifier, string challenge) GeneratePkce()
+        {
+            var bytes = new byte[32];
+            RandomNumberGenerator.Fill(bytes);
+            string verifier = Base64UrlEncode(bytes);
+            using var sha256 = SHA256.Create();
+            string challenge = Base64UrlEncode(sha256.ComputeHash(Encoding.ASCII.GetBytes(verifier)));
+            return (verifier, challenge);
+        }
+
+        static string Base64UrlEncode(byte[] data)
+        {
+            return Convert.ToBase64String(data)
+                .TrimEnd('=')
+                .Replace('+', '-')
+                .Replace('/', '_');
+        }
+
         public static async Task<string> RunSignIn()
         {
             var tcp = new TcpListener(IPAddress.Loopback, 0);
@@ -60,6 +82,7 @@ namespace CloudFix
             tcp.Stop();
 
             string redirectUri = $"http://localhost:{port}/";
+            var (codeVerifier, codeChallenge) = GeneratePkce();
 
             var listener = new HttpListener();
             listener.Prefixes.Add(redirectUri);
@@ -68,13 +91,13 @@ namespace CloudFix
             try
             {
                 string authUrl =
-                    "https://accounts.google.com/o/oauth2/auth" +
+                    AuthEndpoint +
                     $"?client_id={Uri.EscapeDataString(ClientId)}" +
                     $"&redirect_uri={Uri.EscapeDataString(redirectUri)}" +
                     "&response_type=code" +
                     $"&scope={Uri.EscapeDataString(Scope)}" +
-                    "&access_type=offline" +
-                    "&prompt=consent";
+                    $"&code_challenge={Uri.EscapeDataString(codeChallenge)}" +
+                    "&code_challenge_method=S256";
 
                 Process.Start(new ProcessStartInfo(authUrl) { UseShellExecute = true });
 
@@ -108,21 +131,23 @@ namespace CloudFix
                 if (string.IsNullOrEmpty(code))
                     return $"Authentication failed: {error ?? "no authorization code received"}";
 
+                // PKCE token exchange
                 using var http = new HttpClient();
                 var tokenReq = new FormUrlEncodedContent(new Dictionary<string, string>
                 {
                     ["code"] = code,
                     ["client_id"] = ClientId,
-                    ["client_secret"] = ClientSecret,
+                    ["code_verifier"] = codeVerifier,
                     ["redirect_uri"] = redirectUri,
-                    ["grant_type"] = "authorization_code"
+                    ["grant_type"] = "authorization_code",
+                    ["scope"] = Scope
                 });
 
-                var tokenResp = await http.PostAsync(TokenExchangeUrl, tokenReq);
+                var tokenResp = await http.PostAsync(TokenEndpoint, tokenReq);
                 var tokenBody = await tokenResp.Content.ReadAsStringAsync();
 
                 if (!tokenResp.IsSuccessStatusCode)
-                    return $"Token exchange failed: HTTP {(int)tokenResp.StatusCode}";
+                    return $"Token exchange failed: HTTP {(int)tokenResp.StatusCode}\n{tokenBody}";
 
                 using var tokenJson = JsonDocument.Parse(tokenBody);
                 string accessToken = tokenJson.RootElement.GetProperty("access_token").GetString();

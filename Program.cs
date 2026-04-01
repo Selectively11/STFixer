@@ -67,7 +67,7 @@ namespace CloudFix
             }
 
             PrintLine($"Steam: {_steamPath}");
-            GoogleDriveAuth.Init(_steamPath);
+            OneDriveAuth.Init(_steamPath);
 
             // non-blocking update check, don't stall the menu
             try
@@ -110,15 +110,15 @@ namespace CloudFix
                 PrintHeader();
                 PrintLine($"Steam: {_steamPath}");
                 PrintSep();
-                var driveStatus = GoogleDriveAuth.GetStatus();
+                var driveStatus = OneDriveAuth.GetStatus();
                 RunDiagnostics(patcher, driveStatus);
                 PrintSep();
                 Console.WriteLine();
                 PrintMenuItem("1. Setup SteamTools Offline", "makes new SteamTools installations work if servers are down");
                 PrintMenuItem("2. Capcom Game Save Fix", "fixes games that will not create saves");
-                var driveColor = driveStatus == GoogleDriveAuth.Status.Authenticated
+                var driveColor = driveStatus == OneDriveAuth.Status.Authenticated
                     ? ConsoleColor.White : ConsoleColor.Cyan;
-                string driveDesc = "Makes Steam Cloud work! Steam Cloud for non-owned games is rerouted to Google Drive";
+                string driveDesc = "Makes Steam Cloud work! Steam Cloud for non-owned games is rerouted to OneDrive";
                 PrintMenuItem("3. Cloud Save Redirect", driveDesc, driveColor);
                 var fallbackColor = patcher.GetFallbackPatchState() == PatchState.Patched
                     ? ConsoleColor.White : ConsoleColor.Cyan;
@@ -309,7 +309,7 @@ namespace CloudFix
             }
         }
 
-        static void RunDiagnostics(Patcher patcher, GoogleDriveAuth.Status driveStatus)
+        static void RunDiagnostics(Patcher patcher, OneDriveAuth.Status driveStatus)
         {
             try
             {
@@ -322,7 +322,7 @@ namespace CloudFix
             }
         }
 
-        static void RunDiagnosticsInner(Patcher patcher, GoogleDriveAuth.Status driveStatus)
+        static void RunDiagnosticsInner(Patcher patcher, OneDriveAuth.Status driveStatus)
         {
             const long ExpectedVersion = 1773426488;
             var steamVersion = GetSteamVersion();
@@ -425,10 +425,10 @@ namespace CloudFix
                 }
             }
 
-            if (driveStatus == GoogleDriveAuth.Status.Authenticated)
-                PrintGreen($"Google Drive:          signed in");
+            if (driveStatus == OneDriveAuth.Status.Authenticated)
+                PrintGreen($"OneDrive:              signed in");
             else
-                PrintLine($"Google Drive:          not configured (use option 3)");
+                PrintLine($"OneDrive:              not configured (use option 3)");
 
             bool allGood = cloudState == PatchState.Patched
                 && offlineState == PatchState.Patched
@@ -473,7 +473,7 @@ namespace CloudFix
                 return;
             }
             Console.WriteLine($"Steam: {steamPath}");
-            GoogleDriveAuth.Init(steamPath);
+            OneDriveAuth.Init(steamPath);
 
             var patcher = new Patcher(steamPath);
             Console.WriteLine("Applying CloudRedirect...");
@@ -492,7 +492,7 @@ namespace CloudFix
         static void RunCloudRedirectSetup(Patcher patcher)
         {
             PrintLine("Cloud Save Redirect redirects Steam Cloud requests for non-owned games");
-            PrintLine("to Google Drive. This makes Steam Cloud functionality work!");
+            PrintLine("to OneDrive. This makes Steam Cloud functionality work!");
             Console.WriteLine();
 
             var dllPath = Path.Combine(AppContext.BaseDirectory, "cloud_redirect.dll");
@@ -510,17 +510,17 @@ namespace CloudFix
                 PrintGreen("CloudRedirect is already active.");
                 Console.WriteLine();
 
-                var driveStatus = GoogleDriveAuth.GetStatus();
-                if (driveStatus == GoogleDriveAuth.Status.Authenticated)
-                    PrintGreen("Google Drive: signed in");
+                var driveStatus = OneDriveAuth.GetStatus();
+                if (driveStatus == OneDriveAuth.Status.Authenticated)
+                    PrintGreen("OneDrive: signed in");
                 else
-                    PrintYellow("Google Drive: not configured");
+                    PrintYellow("OneDrive: not configured");
                 Console.WriteLine();
 
-                if (driveStatus == GoogleDriveAuth.Status.Authenticated)
-                    PrintMenuItem("1. Sign out of Google Drive", "remove saved tokens");
+                if (driveStatus == OneDriveAuth.Status.Authenticated)
+                    PrintMenuItem("1. Sign out of OneDrive", "remove saved tokens");
                 else
-                    PrintMenuItem("1. Sign in to Google Drive", "sync cloud saves across machines");
+                    PrintMenuItem("1. Sign in to OneDrive", "sync cloud saves across machines");
                 PrintMenuItem("2. Back to main menu", null);
                 Console.WriteLine();
                 Console.Write("  > ");
@@ -531,13 +531,13 @@ namespace CloudFix
                 switch (sub.KeyChar)
                 {
                     case '1':
-                        if (driveStatus == GoogleDriveAuth.Status.Authenticated)
+                        if (driveStatus == OneDriveAuth.Status.Authenticated)
                         {
-                            GoogleDriveAuth.SignOut();
-                            PrintYellow("Signed out. Cloud saves will not sync to Google Drive.");
+                            OneDriveAuth.SignOut();
+                            PrintYellow("Signed out. Cloud saves will not sync to OneDrive.");
                         }
                         else
-                            RunGoogleDriveSignIn();
+                            RunOneDriveSignIn();
                         WaitForKey();
                         return;
                     default:
@@ -561,7 +561,7 @@ namespace CloudFix
                 PrintGreen("CloudRedirect: enabled");
                 Console.WriteLine();
 
-                OfferGoogleDriveSignIn();
+                OfferOneDriveSignIn();
 
                 if (!OfferSteamRestart())
                     WaitForKey();
@@ -573,17 +573,17 @@ namespace CloudFix
             }
         }
 
-        static void OfferGoogleDriveSignIn()
+        static void OfferOneDriveSignIn()
         {
-            var status = GoogleDriveAuth.GetStatus();
-            if (status == GoogleDriveAuth.Status.Authenticated)
+            var status = OneDriveAuth.GetStatus();
+            if (status == OneDriveAuth.Status.Authenticated)
             {
-                PrintGreen("Google Drive: signed in");
+                PrintGreen("OneDrive: signed in");
                 return;
             }
 
-            PrintLine("Google Drive sync lets you access cloud saves across machines.");
-            Console.Write("  Sign in to Google Drive now? [Y/n] ");
+            PrintLine("OneDrive sync lets you access cloud saves across machines.");
+            Console.Write("  Sign in to OneDrive now? [Y/n] ");
             var key = Console.ReadKey(true);
             Console.WriteLine(key.KeyChar);
             Console.WriteLine();
@@ -591,25 +591,25 @@ namespace CloudFix
             if (key.KeyChar is 'n' or 'N')
                 return;
 
-            RunGoogleDriveSignIn();
+            RunOneDriveSignIn();
         }
 
-        static void RunGoogleDriveSignIn()
+        static void RunOneDriveSignIn()
         {
-            PrintLine("Opening browser for Google sign-in...");
+            PrintLine("Opening browser for Microsoft sign-in...");
             PrintLine("(waiting up to 2 minutes)");
             Console.WriteLine();
 
             try
             {
-                var err = GoogleDriveAuth.RunSignIn().GetAwaiter().GetResult();
+                var err = OneDriveAuth.RunSignIn().GetAwaiter().GetResult();
                 if (err != null)
                 {
                     PrintRed(err);
                     return;
                 }
-                PrintGreen("Google Drive: signed in successfully");
-                PrintLine($"  Tokens saved to {GoogleDriveAuth.TokenPath}");
+                PrintGreen("OneDrive: signed in successfully");
+                PrintLine($"  Tokens saved to {OneDriveAuth.TokenPath}");
             }
             catch (Exception ex)
             {
