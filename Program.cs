@@ -504,6 +504,7 @@ namespace CloudFix
                     Console.WriteLine();
                     PrintYellow("SteamTools Desktop is installed and will overwrite DLL patches on startup.");
                     PrintLine("Would you like to disable its DLL deployment? (y/n)");
+                    PrintLine("IF YOU DON'T KNOW WHAT TO DO, PRESS Y");
                     Console.Write("  > ");
                     var answer = Console.ReadLine()?.Trim().ToLowerInvariant();
                     if (answer == "" || answer == "y" || answer == "yes")
