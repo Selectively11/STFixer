@@ -23,9 +23,6 @@
 #define BACKOFF_MAX_MS       60000
 #define BACKOFF_DECAY_MS     120000
 
-// stats re-check interval when limited
-#define STATS_RECHECK_MS     3600000 // 1 hour
-
 // request code cache
 #define CACHE_MAX_ENTRIES    1024
 #define CACHE_TTL_MS         240000  // 4 minutes
@@ -49,10 +46,10 @@ static int  g_daily_warned = 0;
 static int  g_daily_limit_hit = 0;
 static DWORD g_backoff_ms = 0;
 static ULONGLONG g_last_429_tick = 0;
+static ULONGLONG g_reset_filetime = 0; // UTC FILETIME when daily limit resets
 
 // stats check state
 static int  g_stats_checked = 0;
-static ULONGLONG g_last_stats_tick = 0;
 
 // request code cache
 static CacheEntry g_cache[CACHE_MAX_ENTRIES];
@@ -115,9 +112,67 @@ static void dbglog(const char *fmt, ...)
     fclose(f);
 }
 
-// ---- lockout file (cross-process hint) ----
+// ---- time helpers ----
 
-static void write_lockout(void)
+static ULONGLONG get_utc_filetime(void)
+{
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    return ((ULONGLONG)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+}
+
+// calculate next midnight Eastern Time as a UTC FILETIME
+static ULONGLONG calc_next_midnight_et_utc(void)
+{
+    // US Eastern timezone (valid since 2007)
+    TIME_ZONE_INFORMATION etzi;
+    memset(&etzi, 0, sizeof(etzi));
+    etzi.Bias = 300; // UTC-5 base
+    etzi.StandardBias = 0;
+    etzi.DaylightBias = -60;
+    etzi.DaylightDate.wMonth = 3;       // DST starts 2nd Sunday of March
+    etzi.DaylightDate.wDay = 2;
+    etzi.DaylightDate.wDayOfWeek = 0;
+    etzi.DaylightDate.wHour = 2;
+    etzi.StandardDate.wMonth = 11;      // DST ends 1st Sunday of November
+    etzi.StandardDate.wDay = 1;
+    etzi.StandardDate.wDayOfWeek = 0;
+    etzi.StandardDate.wHour = 2;
+
+    // get current UTC, convert to ET
+    SYSTEMTIME utc_now, et_now;
+    GetSystemTime(&utc_now);
+    SystemTimeToTzSpecificLocalTime(&etzi, &utc_now, &et_now);
+
+    // construct today midnight ET, then add 24h for tomorrow midnight
+    SYSTEMTIME et_midnight;
+    memset(&et_midnight, 0, sizeof(et_midnight));
+    et_midnight.wYear = et_now.wYear;
+    et_midnight.wMonth = et_now.wMonth;
+    et_midnight.wDay = et_now.wDay;
+
+    FILETIME ft_mid;
+    SystemTimeToFileTime(&et_midnight, &ft_mid);
+    ULONGLONG ft_val = ((ULONGLONG)ft_mid.dwHighDateTime << 32) | ft_mid.dwLowDateTime;
+    ft_val += (ULONGLONG)24 * 60 * 60 * 10000000; // +24h in 100ns units
+
+    ft_mid.dwHighDateTime = (DWORD)(ft_val >> 32);
+    ft_mid.dwLowDateTime = (DWORD)ft_val;
+    SYSTEMTIME et_tomorrow;
+    FileTimeToSystemTime(&ft_mid, &et_tomorrow);
+
+    // convert tomorrow midnight ET back to UTC
+    SYSTEMTIME utc_reset;
+    TzSpecificLocalTimeToSystemTime(&etzi, &et_tomorrow, &utc_reset);
+
+    FILETIME ft_result;
+    SystemTimeToFileTime(&utc_reset, &ft_result);
+    return ((ULONGLONG)ft_result.dwHighDateTime << 32) | ft_result.dwLowDateTime;
+}
+
+// ---- lockout file (stores reset timestamp) ----
+
+static void write_lockout_time(ULONGLONG reset_ft)
 {
     if (!get_exe_dir()) return;
     char path[MAX_PATH];
@@ -126,8 +181,26 @@ static void write_lockout(void)
     HANDLE hf = CreateFileA(path, GENERIC_WRITE, 0, NULL,
                             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hf == INVALID_HANDLE_VALUE) return;
-    // just a marker — content doesn't matter
+    DWORD written;
+    WriteFile(hf, &reset_ft, sizeof(reset_ft), &written, NULL);
     CloseHandle(hf);
+}
+
+static ULONGLONG read_lockout_time(void)
+{
+    if (!get_exe_dir()) return 0;
+    char path[MAX_PATH];
+    _snprintf(path, MAX_PATH, "%s%s", g_exe_dir, STELLA_LOCKOUT_NAME);
+    path[MAX_PATH - 1] = '\0';
+    HANDLE hf = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                            OPEN_EXISTING, 0, NULL);
+    if (hf == INVALID_HANDLE_VALUE) return 0;
+    ULONGLONG val = 0;
+    DWORD bytes_read;
+    ReadFile(hf, &val, sizeof(val), &bytes_read, NULL);
+    CloseHandle(hf);
+    if (bytes_read != sizeof(val)) return 0;
+    return val;
 }
 
 static void delete_lockout(void)
@@ -137,15 +210,6 @@ static void delete_lockout(void)
     _snprintf(path, MAX_PATH, "%s%s", g_exe_dir, STELLA_LOCKOUT_NAME);
     path[MAX_PATH - 1] = '\0';
     DeleteFileA(path);
-}
-
-static int lockout_exists(void)
-{
-    if (!get_exe_dir()) return 0;
-    char path[MAX_PATH];
-    _snprintf(path, MAX_PATH, "%s%s", g_exe_dir, STELLA_LOCKOUT_NAME);
-    path[MAX_PATH - 1] = '\0';
-    return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
 }
 
 // ---- JSON parsing helpers ----
@@ -319,6 +383,31 @@ static void notify_daily_limit(void)
         "STFixer", MB_OK | MB_ICONINFORMATION | MB_SYSTEMMODAL);
 }
 
+// enter daily lockout: calculate reset time, persist, notify
+static void enter_daily_lockout(void)
+{
+    g_daily_limit_hit = 1;
+    g_reset_filetime = calc_next_midnight_et_utc();
+    write_lockout_time(g_reset_filetime);
+
+    FILETIME ft;
+    ft.dwHighDateTime = (DWORD)(g_reset_filetime >> 32);
+    ft.dwLowDateTime = (DWORD)g_reset_filetime;
+    SYSTEMTIME st;
+    FileTimeToSystemTime(&ft, &st);
+    dbglog("daily lockout until %04d-%02d-%02d %02d:%02d:%02d UTC",
+           st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+
+    notify_daily_limit();
+}
+
+static void clear_daily_lockout(void)
+{
+    g_daily_limit_hit = 0;
+    g_reset_filetime = 0;
+    delete_lockout();
+}
+
 // ---- stats check ----
 
 // query the stats endpoint. returns: 1 = can make requests, 0 = limited, -1 = error.
@@ -358,26 +447,19 @@ static int query_stats(void)
     return -1;  // couldn't determine
 }
 
-// check stats and update daily limit state. called on first request and periodically.
+// check stats and update daily limit state
 static void do_stats_check(void)
 {
-    g_last_stats_tick = GetTickCount64();
-
     int result = query_stats();
     if (result == 1) {
-        // we're good — clear any limit
         if (g_daily_limit_hit) {
             dbglog("daily limit cleared by stats check");
-            g_daily_limit_hit = 0;
-            delete_lockout();
+            clear_daily_lockout();
         }
     } else if (result == 0) {
-        // limited
         if (!g_daily_limit_hit) {
             dbglog("daily limit confirmed by stats check");
-            g_daily_limit_hit = 1;
-            write_lockout();
-            notify_daily_limit();
+            enter_daily_lockout();
         }
     }
     // result == -1: couldn't reach stats, don't change state
@@ -501,22 +583,50 @@ __declspec(dllexport) unsigned __int64 __fastcall StellaGetRequestCode(
         return 0;
     }
 
-    // first call: check stats to see if we can make requests
+    // first call: stats check (fresh on every Steam restart)
     if (!g_stats_checked)
     {
         g_stats_checked = 1;
         dbglog("initial stats check");
-        do_stats_check();
+
+        int result = query_stats();
+        if (result == 1) {
+            // clear stale lockout if present
+            delete_lockout();
+        } else if (result == 0) {
+            dbglog("daily limit active on startup");
+            enter_daily_lockout();
+        } else {
+            // stats unreachable — check lockout file as fallback
+            ULONGLONG lockout_time = read_lockout_time();
+            if (lockout_time > 0 && get_utc_filetime() < lockout_time) {
+                dbglog("stats unreachable, lockout file still active");
+                g_daily_limit_hit = 1;
+                g_reset_filetime = lockout_time;
+            } else if (lockout_time > 0) {
+                dbglog("lockout expired, clearing");
+                delete_lockout();
+            }
+        }
     }
 
-    // if daily-limited, periodically re-check stats in case limit resets
+    // if daily-limited, wait for reset time
     if (g_daily_limit_hit)
     {
-        ULONGLONG now = GetTickCount64();
-        if (now - g_last_stats_tick >= STATS_RECHECK_MS)
+        if (get_utc_filetime() >= g_reset_filetime)
         {
-            dbglog("re-checking stats (daily limit active)");
-            do_stats_check();
+            dbglog("reset time reached, checking stats");
+            int result = query_stats();
+            if (result == 1) {
+                dbglog("daily limit cleared after reset");
+                clear_daily_lockout();
+            } else if (result == 0) {
+                // still limited — recalculate next midnight
+                dbglog("still limited, extending lockout");
+                g_reset_filetime = calc_next_midnight_et_utc();
+                write_lockout_time(g_reset_filetime);
+            }
+            // result == -1: stats unreachable, try again next call
         }
         if (g_daily_limit_hit)
             return 0;
@@ -597,9 +707,8 @@ __declspec(dllexport) unsigned __int64 __fastcall StellaGetRequestCode(
             do_stats_check();
             if (!g_daily_limit_hit) {
                 // stats said we're ok? trust the 429 anyway for this call
-                g_daily_limit_hit = 1;
-                write_lockout();
-                notify_daily_limit();
+                dbglog("stats disagrees, trusting 429");
+                enter_daily_lockout();
             }
         }
         goto error_backoff;
