@@ -569,8 +569,8 @@ __declspec(dllexport) unsigned __int64 __fastcall StellaGetRequestCode(
 
     if (status == 0)
     {
-        dbglog("request failed");
-        return 0;
+        dbglog("request failed (no connection)");
+        goto error_backoff;
     }
 
     if (status == 401 && !g_auth_warned)
@@ -582,7 +582,7 @@ __declspec(dllexport) unsigned __int64 __fastcall StellaGetRequestCode(
             "Manifest downloads will fail until you update it.\n\n"
             "Get a new API key and run CloudFix again to update it.",
             "STFixer", MB_OK | MB_ICONWARNING | MB_SYSTEMMODAL);
-        return 0;
+        goto error_backoff;
     }
 
     if (status == 429)
@@ -601,38 +601,42 @@ __declspec(dllexport) unsigned __int64 __fastcall StellaGetRequestCode(
                 write_lockout();
                 notify_daily_limit();
             }
-        } else {
-            // per-minute rate limit — exponential backoff
-            g_last_429_tick = GetTickCount64();
-            if (g_backoff_ms == 0)
-                g_backoff_ms = BACKOFF_INITIAL_MS;
-            else if (g_backoff_ms < BACKOFF_MAX_MS)
-                g_backoff_ms = g_backoff_ms * 2;
-            if (g_backoff_ms > BACKOFF_MAX_MS)
-                g_backoff_ms = BACKOFF_MAX_MS;
-            dbglog("rate limited, next backoff=%lu ms", g_backoff_ms);
         }
-        return 0;
+        goto error_backoff;
     }
 
     if (status != 200)
     {
-        dbglog("error: %s", body);
-        return 0;
+        dbglog("error: HTTP %lu, body: %s", status, body);
+        goto error_backoff;
     }
-
-    // success — reset backoff
-    g_backoff_ms = 0;
 
     dbglog("response: %.*s", (int)body_len, body);
 
     unsigned __int64 result = parse_request_code(body, body_len);
     dbglog("request_code=%llu", result);
 
-    if (result != 0)
-        cache_put(depot_id, manifest_id, result);
+    if (result == 0)
+    {
+        dbglog("bad response (no valid request code)");
+        goto error_backoff;
+    }
 
+    // success — reset backoff
+    g_backoff_ms = 0;
+    cache_put(depot_id, manifest_id, result);
     return result;
+
+error_backoff:
+    g_last_429_tick = GetTickCount64();
+    if (g_backoff_ms == 0)
+        g_backoff_ms = BACKOFF_INITIAL_MS;
+    else if (g_backoff_ms < BACKOFF_MAX_MS)
+        g_backoff_ms = g_backoff_ms * 2;
+    if (g_backoff_ms > BACKOFF_MAX_MS)
+        g_backoff_ms = BACKOFF_MAX_MS;
+    dbglog("backoff escalated to %lu ms", g_backoff_ms);
+    return 0;
 }
 
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
