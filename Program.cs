@@ -265,6 +265,8 @@ namespace CloudFix
                         Console.WriteLine();
                         if (restoreConfirm.KeyChar is not ('y' or 'Y'))
                             break;
+                        if (patcher.GetSteamToolsExePatchState() == 0)
+                            KillSteamToolsIfRunning();
                         var restoreResult = patcher.Restore();
                         Console.WriteLine();
                         if (restoreResult.Succeeded)
