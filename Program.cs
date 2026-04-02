@@ -491,6 +491,43 @@ namespace CloudFix
 
         static void RunCloudRedirectSetup(Patcher patcher)
         {
+            // giant impossible-to-miss warning — slow scroll so the user actually reads it
+            Console.ForegroundColor = ConsoleColor.Red;
+            var warningLines = new[]
+            {
+                "",
+                "  XX      XX     XX      XX     XX      XX",
+                "   XX    XX       XX    XX       XX    XX ",
+                "    XX  XX         XX  XX         XX  XX  ",
+                "     XXXX           XXXX           XXXX   ",
+                "    XX  XX         XX  XX         XX  XX  ",
+                "   XX    XX       XX    XX       XX    XX ",
+                "  XX      XX     XX      XX     XX      XX",
+                "",
+                "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+                "  !!                                         !!",
+                "  !!       EXPERIMENTAL - DATA LOSS RISK     !!",
+                "  !!                                         !!",
+                "  !!  This feature is EXPERIMENTAL and under !!",
+                "  !!  active development. It may:            !!",
+                "  !!                                         !!",
+                "  !!    - CORRUPT your save files            !!",
+                "  !!    - LOSE your save data                !!",
+                "  !!    - OVERWRITE good saves with bad ones !!",
+                "  !!                                         !!",
+                "  !!  BACK UP YOUR SAVES before using this.  !!",
+                "  !!  You have been warned!                  !!",
+                "  !!                                         !!",
+                "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+                "",
+            };
+            foreach (var line in warningLines)
+            {
+                Console.WriteLine(line);
+                System.Threading.Thread.Sleep(80);
+            }
+            Console.ResetColor();
+
             PrintLine("Cloud Save Redirect redirects Steam Cloud requests for non-owned games");
             PrintLine("to OneDrive. This makes Steam Cloud functionality work!");
             Console.WriteLine();
@@ -1056,7 +1093,11 @@ namespace CloudFix
         static void PrintHeader()
         {
             Console.WriteLine();
-            Console.WriteLine($"  STFixer v{_version}");
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.WriteLine("  ============================================");
+            Console.WriteLine($"   STFixer v{_version} - Private Test Build #1");
+            Console.WriteLine("  ============================================");
+            Console.ResetColor();
             Console.WriteLine("  SteamTools patcher");
             Console.WriteLine();
         }
