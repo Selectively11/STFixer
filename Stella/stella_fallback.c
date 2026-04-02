@@ -24,7 +24,7 @@
 #define BACKOFF_DECAY_MS     120000
 
 // stats re-check interval when limited
-#define STATS_RECHECK_MS     300000  // 5 minutes
+#define STATS_RECHECK_MS     3600000 // 1 hour
 
 // request code cache
 #define CACHE_MAX_ENTRIES    1024
