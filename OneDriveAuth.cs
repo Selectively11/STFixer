@@ -19,7 +19,7 @@ namespace CloudFix
     {
         // user registers their own Azure AD app — this is the Application (client) ID.
         const string ClientId = "c582f799-5dc5-48a7-a4cd-cd0d8af354a2";
-        const string Scope = "Files.ReadWrite offline_access";
+        const string Scope = "Files.ReadWrite.AppFolder offline_access";
         const string AuthEndpoint = "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize";
         const string TokenEndpoint = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
 
