@@ -1094,9 +1094,9 @@ namespace CloudFix
         {
             Console.WriteLine();
             Console.ForegroundColor = ConsoleColor.Cyan;
-            Console.WriteLine("  ============================================");
+            Console.WriteLine("  ====================================================");
             Console.WriteLine($"   STFixer v{_version} - Private Test Build #1");
-            Console.WriteLine("  ============================================");
+            Console.WriteLine("  ====================================================");
             Console.ResetColor();
             Console.WriteLine("  SteamTools patcher");
             Console.WriteLine();
