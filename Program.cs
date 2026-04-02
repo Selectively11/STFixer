@@ -68,8 +68,7 @@ namespace CloudFix
 
             PrintLine($"Steam: {_steamPath}");
             CloudConfig.Init();
-            OneDriveAuth.Init(_steamPath);
-            GoogleDriveAuth.Init(_steamPath);
+            CloudAuth.Init();
 
             // non-blocking update check, don't stall the menu
             try
@@ -112,13 +111,13 @@ namespace CloudFix
                 PrintHeader();
                 PrintLine($"Steam: {_steamPath}");
                 PrintSep();
-                var driveStatus = GetActiveAuthStatus();
+                var driveStatus = CloudAuth.GetStatus();
                 RunDiagnostics(patcher, driveStatus);
                 PrintSep();
                 Console.WriteLine();
                 PrintMenuItem("1. Setup SteamTools Offline", "makes new SteamTools installations work if servers are down");
                 PrintMenuItem("2. Capcom Game Save Fix", "fixes games that will not create saves");
-                var driveColor = driveStatus == OneDriveAuth.Status.Authenticated
+                var driveColor = driveStatus == CloudAuth.Status.Authenticated
                     ? ConsoleColor.White : ConsoleColor.Cyan;
                 string backendName = CloudConfig.BackendDisplayName();
                 string driveDesc = $"Makes Steam Cloud work! Saves are synced to {backendName}";
@@ -312,7 +311,7 @@ namespace CloudFix
             }
         }
 
-        static void RunDiagnostics(Patcher patcher, OneDriveAuth.Status driveStatus)
+        static void RunDiagnostics(Patcher patcher, CloudAuth.Status driveStatus)
         {
             try
             {
@@ -325,23 +324,7 @@ namespace CloudFix
             }
         }
 
-        // returns the auth status from whichever backend is currently active
-        static OneDriveAuth.Status GetActiveAuthStatus()
-        {
-            var backend = CloudConfig.GetBackend();
-            if (backend == "gdrive")
-            {
-                return GoogleDriveAuth.GetStatus() switch
-                {
-                    GoogleDriveAuth.Status.Authenticated => OneDriveAuth.Status.Authenticated,
-                    GoogleDriveAuth.Status.Error => OneDriveAuth.Status.Error,
-                    _ => OneDriveAuth.Status.NotAuthenticated
-                };
-            }
-            return OneDriveAuth.GetStatus();
-        }
-
-        static void RunDiagnosticsInner(Patcher patcher, OneDriveAuth.Status driveStatus)
+        static void RunDiagnosticsInner(Patcher patcher, CloudAuth.Status driveStatus)
         {
             const long ExpectedVersion = 1773426488;
             var steamVersion = GetSteamVersion();
@@ -444,17 +427,17 @@ namespace CloudFix
                 }
             }
 
-            string backendLabel = CloudConfig.BackendDisplayName();
-            if (driveStatus == OneDriveAuth.Status.Authenticated)
+            string backendLabel = CloudConfig.BackendDisplayName() + ":";
+            if (driveStatus == CloudAuth.Status.Authenticated)
             {
                 if (!patcher.IsCloudRedirectDllCurrent()
                     && patcher.GetCloudRedirectPatchState() == PatchState.Patched)
-                    PrintYellow($"{backendLabel,-22} signed in (DLL outdated)");
+                    PrintYellow($"{backendLabel,-23}signed in (DLL outdated)");
                 else
-                    PrintGreen($"{backendLabel,-22} signed in");
+                    PrintGreen($"{backendLabel,-23}signed in");
             }
             else
-                PrintLine($"{backendLabel,-22} not configured (use option 3)");
+                PrintLine($"{backendLabel,-23}not configured (use option 3)");
 
             bool allGood = cloudState == PatchState.Patched
                 && offlineState == PatchState.Patched
@@ -500,8 +483,7 @@ namespace CloudFix
             }
             Console.WriteLine($"Steam: {steamPath}");
             CloudConfig.Init();
-            OneDriveAuth.Init(steamPath);
-            GoogleDriveAuth.Init(steamPath);
+            CloudAuth.Init();
 
             var patcher = new Patcher(steamPath);
             Console.WriteLine("Applying CloudRedirect...");
@@ -593,14 +575,14 @@ namespace CloudFix
 
                 var backend = CloudConfig.GetBackend();
                 var backendName = CloudConfig.BackendDisplayName();
-                var driveStatus = GetActiveAuthStatus();
-                if (driveStatus == OneDriveAuth.Status.Authenticated)
+                var driveStatus = CloudAuth.GetStatus();
+                if (driveStatus == CloudAuth.Status.Authenticated)
                     PrintGreen($"{backendName}: signed in");
                 else
                     PrintYellow($"{backendName}: not configured");
                 Console.WriteLine();
 
-                if (driveStatus == OneDriveAuth.Status.Authenticated)
+                if (driveStatus == CloudAuth.Status.Authenticated)
                     PrintMenuItem($"1. Sign out of {backendName}", "remove saved tokens");
                 else
                     PrintMenuItem($"1. Sign in to {backendName}", "sync cloud saves across machines");
@@ -616,13 +598,13 @@ namespace CloudFix
                 switch (sub.KeyChar)
                 {
                     case '1':
-                        if (driveStatus == OneDriveAuth.Status.Authenticated)
+                        if (driveStatus == CloudAuth.Status.Authenticated)
                         {
-                            ActiveSignOut();
+                            CloudAuth.SignOut();
                             PrintYellow($"Signed out. Cloud saves will not sync to {backendName}.");
                         }
                         else
-                            RunActiveSignIn();
+                            RunCloudSignIn();
                         WaitForKey();
                         return;
                     case '2':
@@ -670,9 +652,9 @@ namespace CloudFix
 
         static void OfferCloudSignIn()
         {
-            var status = GetActiveAuthStatus();
+            var status = CloudAuth.GetStatus();
             var backendName = CloudConfig.BackendDisplayName();
-            if (status == OneDriveAuth.Status.Authenticated)
+            if (status == CloudAuth.Status.Authenticated)
             {
                 PrintGreen($"{backendName}: signed in");
                 return;
@@ -687,67 +669,31 @@ namespace CloudFix
             if (key.KeyChar is 'n' or 'N')
                 return;
 
-            RunActiveSignIn();
+            RunCloudSignIn();
         }
 
-        static void RunActiveSignIn()
+        static void RunCloudSignIn()
         {
-            var backend = CloudConfig.GetBackend();
             var backendName = CloudConfig.BackendDisplayName();
+            PrintLine($"Opening browser for {backendName} sign-in...");
+            PrintLine("(waiting up to 2 minutes)");
+            Console.WriteLine();
 
-            if (backend == "gdrive")
+            try
             {
-                PrintLine("Opening browser for Google sign-in...");
-                PrintLine("(waiting up to 2 minutes)");
-                Console.WriteLine();
-
-                try
+                var err = CloudAuth.RunSignIn().GetAwaiter().GetResult();
+                if (err != null)
                 {
-                    var err = GoogleDriveAuth.RunSignIn().GetAwaiter().GetResult();
-                    if (err != null)
-                    {
-                        PrintRed(err);
-                        return;
-                    }
-                    PrintGreen("Google Drive: signed in successfully");
-                    PrintLine($"  Tokens saved to {GoogleDriveAuth.TokenPath}");
+                    PrintRed(err);
+                    return;
                 }
-                catch (Exception ex)
-                {
-                    PrintRed($"Sign-in error: {ex.Message}");
-                }
+                PrintGreen($"{backendName}: signed in successfully");
+                PrintLine($"  Tokens saved to {CloudAuth.TokenPath}");
             }
-            else
+            catch (Exception ex)
             {
-                PrintLine("Opening browser for Microsoft sign-in...");
-                PrintLine("(waiting up to 2 minutes)");
-                Console.WriteLine();
-
-                try
-                {
-                    var err = OneDriveAuth.RunSignIn().GetAwaiter().GetResult();
-                    if (err != null)
-                    {
-                        PrintRed(err);
-                        return;
-                    }
-                    PrintGreen("OneDrive: signed in successfully");
-                    PrintLine($"  Tokens saved to {OneDriveAuth.TokenPath}");
-                }
-                catch (Exception ex)
-                {
-                    PrintRed($"Sign-in error: {ex.Message}");
-                }
+                PrintRed($"Sign-in error: {ex.Message}");
             }
-        }
-
-        static void ActiveSignOut()
-        {
-            var backend = CloudConfig.GetBackend();
-            if (backend == "gdrive")
-                GoogleDriveAuth.SignOut();
-            else
-                OneDriveAuth.SignOut();
         }
 
         static void RunFallbackSetup(Patcher patcher)
@@ -1191,7 +1137,7 @@ namespace CloudFix
             Console.WriteLine();
             Console.ForegroundColor = ConsoleColor.Cyan;
             Console.WriteLine("  ====================================================");
-            Console.WriteLine($"   CloudRedirect v{_version} - Private Test Build #1");
+            Console.WriteLine($"   CloudRedirect v{_version} - Private Test Build #2");
             Console.WriteLine("  ====================================================");
             Console.ResetColor();
             Console.WriteLine("  SteamTools patcher");
@@ -1343,7 +1289,7 @@ namespace CloudFix
 
         internal static void PrintSep()
         {
-            Console.WriteLine("==================================================");
+            Console.WriteLine("  ====================================================");
         }
 
         internal static void PrintLine(string msg)

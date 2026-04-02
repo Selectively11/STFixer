@@ -13,27 +13,32 @@ using System.Threading.Tasks;
 
 namespace CloudFix
 {
-    // one-time OneDrive OAuth browser flow for CloudRedirect.
-    // the DLL handles token refresh -- this just gets the initial refresh_token.
-    internal static class OneDriveAuth
+    // unified OAuth flow for CloudRedirect — dispatches to Google Drive or OneDrive
+    // based on CloudConfig. the DLL handles token refresh; this just gets the initial
+    // refresh_token via a one-time browser sign-in.
+    internal static class CloudAuth
     {
-        // user registers their own Azure AD app — this is the Application (client) ID.
-        const string ClientId = "c582f799-5dc5-48a7-a4cd-cd0d8af354a2";
-        const string Scope = "Files.ReadWrite offline_access";
-        const string AuthEndpoint = "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize";
-        const string TokenEndpoint = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
+        // Google Drive (clasp OAuth credentials)
+        const string GDriveClientId = "1072944905499-vm2v2i5dvn0a0d2o4ca36i1vge8cvbn0.apps.googleusercontent.com";
+        const string GDriveClientSecret = "v6V3fKV_zWU7iw1DrpO1rknX";
+        const string GDriveScope = "https://www.googleapis.com/auth/drive.file";
+        const string GDriveAuthEndpoint = "https://accounts.google.com/o/oauth2/auth";
+        const string GDriveTokenEndpoint = "https://oauth2.googleapis.com/token";
 
-        public const string TokenFilename = "tokens.json";
+        // OneDrive (Azure AD public client)
+        const string OneDriveClientId = "c582f799-5dc5-48a7-a4cd-cd0d8af354a2";
+        const string OneDriveScope = "Files.ReadWrite offline_access";
+        const string OneDriveAuthEndpoint = "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize";
+        const string OneDriveTokenEndpoint = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
 
         public static string TokenPath { get; private set; }
 
-        public static void Init(string steamPath)
+        public static void Init()
         {
-            // tokens live in %APPDATA%\CloudRedirect\ so each Windows user gets their own
             var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
             var dir = Path.Combine(appData, "CloudRedirect");
             Directory.CreateDirectory(dir);
-            TokenPath = Path.Combine(dir, TokenFilename);
+            TokenPath = Path.Combine(dir, "tokens.json");
         }
 
         public enum Status { Authenticated, NotAuthenticated, Error }
@@ -55,27 +60,17 @@ namespace CloudFix
             }
         }
 
-        // PKCE: generate a random code_verifier and derive code_challenge
-        static (string verifier, string challenge) GeneratePkce()
+        public static void SignOut()
         {
-            var bytes = new byte[32];
-            RandomNumberGenerator.Fill(bytes);
-            string verifier = Base64UrlEncode(bytes);
-            using var sha256 = SHA256.Create();
-            string challenge = Base64UrlEncode(sha256.ComputeHash(Encoding.ASCII.GetBytes(verifier)));
-            return (verifier, challenge);
+            if (File.Exists(TokenPath))
+                File.Delete(TokenPath);
         }
 
-        static string Base64UrlEncode(byte[] data)
-        {
-            return Convert.ToBase64String(data)
-                .TrimEnd('=')
-                .Replace('+', '-')
-                .Replace('/', '_');
-        }
-
+        // returns null on success, error string on failure
         public static async Task<string> RunSignIn()
         {
+            bool isGDrive = CloudConfig.GetBackend() == "gdrive";
+
             // allocate a random port and start HttpListener on it.
             // retry up to 5 times to avoid TOCTOU race on port allocation.
             HttpListener listener = null;
@@ -103,19 +98,39 @@ namespace CloudFix
             if (listener == null)
                 return "Failed to allocate a local port for OAuth callback after 5 attempts";
 
-            var (codeVerifier, codeChallenge) = GeneratePkce();
+            // PKCE for OneDrive
+            string codeVerifier = null;
+            string codeChallenge = null;
+            if (!isGDrive)
+                (codeVerifier, codeChallenge) = GeneratePkce();
 
             try
             {
-                string authUrl =
-                    AuthEndpoint +
-                    $"?client_id={Uri.EscapeDataString(ClientId)}" +
-                    $"&redirect_uri={Uri.EscapeDataString(redirectUri)}" +
-                    "&response_type=code" +
-                    $"&scope={Uri.EscapeDataString(Scope)}" +
-                    $"&code_challenge={Uri.EscapeDataString(codeChallenge)}" +
-                    "&code_challenge_method=S256" +
-                    "&prompt=consent";
+                // build auth URL — differs per backend
+                string authUrl;
+                if (isGDrive)
+                {
+                    authUrl =
+                        GDriveAuthEndpoint +
+                        $"?client_id={Uri.EscapeDataString(GDriveClientId)}" +
+                        $"&redirect_uri={Uri.EscapeDataString(redirectUri)}" +
+                        "&response_type=code" +
+                        $"&scope={Uri.EscapeDataString(GDriveScope)}" +
+                        "&access_type=offline" +
+                        "&prompt=consent";
+                }
+                else
+                {
+                    authUrl =
+                        OneDriveAuthEndpoint +
+                        $"?client_id={Uri.EscapeDataString(OneDriveClientId)}" +
+                        $"&redirect_uri={Uri.EscapeDataString(redirectUri)}" +
+                        "&response_type=code" +
+                        $"&scope={Uri.EscapeDataString(OneDriveScope)}" +
+                        $"&code_challenge={Uri.EscapeDataString(codeChallenge)}" +
+                        "&code_challenge_method=S256" +
+                        "&prompt=consent";
+                }
 
                 Process.Start(new ProcessStartInfo(authUrl) { UseShellExecute = true });
 
@@ -140,7 +155,7 @@ namespace CloudFix
                     : "<html><body style='font-family:sans-serif;text-align:center;padding:60px'>" +
                       "<h2>Authentication failed.</h2></body></html>";
 
-                byte[] responseBytes = System.Text.Encoding.UTF8.GetBytes(html);
+                byte[] responseBytes = Encoding.UTF8.GetBytes(html);
                 ctx.Response.ContentType = "text/html";
                 ctx.Response.ContentLength64 = responseBytes.Length;
                 await ctx.Response.OutputStream.WriteAsync(responseBytes);
@@ -149,19 +164,32 @@ namespace CloudFix
                 if (string.IsNullOrEmpty(code))
                     return $"Authentication failed: {error ?? "no authorization code received"}";
 
-                // PKCE token exchange
+                // token exchange — Google uses client_secret, OneDrive uses PKCE code_verifier
                 using var http = new HttpClient();
-                var tokenReq = new FormUrlEncodedContent(new Dictionary<string, string>
+                var tokenParams = new Dictionary<string, string>
                 {
                     ["code"] = code,
-                    ["client_id"] = ClientId,
-                    ["code_verifier"] = codeVerifier,
                     ["redirect_uri"] = redirectUri,
-                    ["grant_type"] = "authorization_code",
-                    ["scope"] = Scope
-                });
+                    ["grant_type"] = "authorization_code"
+                };
 
-                var tokenResp = await http.PostAsync(TokenEndpoint, tokenReq);
+                string tokenEndpoint;
+                if (isGDrive)
+                {
+                    tokenParams["client_id"] = GDriveClientId;
+                    tokenParams["client_secret"] = GDriveClientSecret;
+                    tokenEndpoint = GDriveTokenEndpoint;
+                }
+                else
+                {
+                    tokenParams["client_id"] = OneDriveClientId;
+                    tokenParams["code_verifier"] = codeVerifier;
+                    tokenParams["scope"] = OneDriveScope;
+                    tokenEndpoint = OneDriveTokenEndpoint;
+                }
+
+                var tokenReq = new FormUrlEncodedContent(tokenParams);
+                var tokenResp = await http.PostAsync(tokenEndpoint, tokenReq);
                 var tokenBody = await tokenResp.Content.ReadAsStringAsync();
 
                 if (!tokenResp.IsSuccessStatusCode)
@@ -188,10 +216,23 @@ namespace CloudFix
             }
         }
 
-        public static void SignOut()
+        // PKCE helpers (OneDrive only)
+        static (string verifier, string challenge) GeneratePkce()
         {
-            if (File.Exists(TokenPath))
-                File.Delete(TokenPath);
+            var bytes = new byte[32];
+            RandomNumberGenerator.Fill(bytes);
+            string verifier = Base64UrlEncode(bytes);
+            using var sha256 = SHA256.Create();
+            string challenge = Base64UrlEncode(sha256.ComputeHash(Encoding.ASCII.GetBytes(verifier)));
+            return (verifier, challenge);
+        }
+
+        static string Base64UrlEncode(byte[] data)
+        {
+            return Convert.ToBase64String(data)
+                .TrimEnd('=')
+                .Replace('+', '-')
+                .Replace('/', '_');
         }
 
         static string ParseQueryParam(string query, string name)
