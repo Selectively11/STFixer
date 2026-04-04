@@ -214,35 +214,26 @@ namespace CloudFix
         public PatchState GetPatchState()
         {
             _verbose = false;
-            var hijackDll = FindCoreDll();
-            if (hijackDll == null)
+
+            var cachePath = Fingerprint.FindCachePath(_steamPath, verbose: false);
+            if (cachePath == null)
                 return PatchState.NotInstalled;
 
-            var dllPath = Path.Combine(_steamPath, hijackDll);
-
-            byte[] dll;
-            try
-            {
-                using var fs = new FileStream(dllPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-                dll = new byte[fs.Length];
-                fs.ReadExactly(dll);
-            }
-            catch (IOException)
-            {
-                return PatchState.UnknownVersion;
-            }
-
-            var resolvedCore = ResolveCorePatchOffsets(dll);
-            if (resolvedCore == null)
+            var payload = GetDecryptedPayload(cachePath);
+            if (payload == null)
                 return PatchState.UnknownVersion;
 
-            var (_, applied, skipped, errors) = CheckPatches(dll, resolvedCore);
+            var resolved = ResolvePayloadPatchOffsets(payload);
+            if (resolved == null)
+                return PatchState.UnknownVersion;
+
+            var (_, applied, skipped, errors) = CheckPatches(payload, resolved);
 
             if (errors.Count > 0)
                 return PatchState.OutOfDate;
-            if (applied == 0 && skipped == resolvedCore.Length)
+            if (applied == 0 && skipped == resolved.Length)
                 return PatchState.Patched;
-            if (skipped == 0 && applied == resolvedCore.Length)
+            if (skipped == 0 && applied == resolved.Length)
                 return PatchState.Unpatched;
 
             return PatchState.PartiallyPatched;

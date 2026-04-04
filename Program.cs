@@ -329,6 +329,25 @@ namespace CloudFix
             else
                 PrintYellow("Steam version:         unknown");
 
+            var offlineState = patcher.GetOfflinePatchState();
+            string offlineLabel = offlineState switch
+            {
+                PatchState.Unpatched => "not patched",
+                PatchState.Patched => "patched",
+                PatchState.OutOfDate => "out of date",
+                PatchState.PartiallyPatched => "partially patched",
+                PatchState.UnknownVersion => "unknown payload version",
+                PatchState.NotInstalled => "payload not found",
+                _ => "unknown"
+            };
+
+            if (offlineState == PatchState.Patched)
+                PrintGreen($"Offline:               {offlineLabel}");
+            else if (offlineState == PatchState.OutOfDate)
+                PrintYellow($"Offline:               {offlineLabel}");
+            else
+                PrintRed($"Offline:               {offlineLabel}");
+
             var cloudState = patcher.GetPatchState();
             string cloudLabel = cloudState switch
             {
@@ -353,25 +372,6 @@ namespace CloudFix
                 PrintLine("  Use option 7 to download SteamTools DLLs");
                 return;
             }
-
-            var offlineState = patcher.GetOfflinePatchState();
-            string offlineLabel = offlineState switch
-            {
-                PatchState.Unpatched => "not patched",
-                PatchState.Patched => "patched",
-                PatchState.OutOfDate => "out of date",
-                PatchState.PartiallyPatched => "partially patched",
-                PatchState.UnknownVersion => "unknown payload version",
-                PatchState.NotInstalled => "payload not found",
-                _ => "unknown"
-            };
-
-            if (offlineState == PatchState.Patched)
-                PrintGreen($"Offline:               {offlineLabel}");
-            else if (offlineState == PatchState.OutOfDate)
-                PrintYellow($"Offline:               {offlineLabel}");
-            else
-                PrintRed($"Offline:               {offlineLabel}");
 
             var fallbackState = patcher.GetFallbackPatchState();
             string fallbackLabel = fallbackState switch
