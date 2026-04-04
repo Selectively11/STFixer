@@ -107,7 +107,14 @@ namespace CloudFix
                 Console.WriteLine();
                 PrintMenuItem("1. Setup SteamTools Offline", "makes new SteamTools installations work if servers are down");
                 PrintMenuItem("2. Capcom Game Save Fix", "fixes games that will not create saves");
-                PrintMenuItem("3. This space intentionally left blank", null);
+                bool anyPatched = patcher.GetOfflinePatchState() == PatchState.Patched
+                    || patcher.GetPatchState() == PatchState.Patched
+                    || patcher.GetFallbackPatchState() == PatchState.Patched;
+                int stState = patcher.GetSteamToolsExePatchState();
+                if (anyPatched && stState == 1)
+                    PrintMenuItem("3. Patch SteamTools App", "prevents SteamTools Desktop from overwriting patches");
+                else
+                    PrintMenuItem("3. This space intentionally left blank", null);
                 var fallbackColor = patcher.GetFallbackPatchState() == PatchState.Patched
                     ? ConsoleColor.White : ConsoleColor.Cyan;
                 PrintMenuItem("4. Enable Morrenus fallback", "fixes \"No Internet Connection\" error", fallbackColor);
@@ -151,6 +158,7 @@ namespace CloudFix
                         if (setupResult.Succeeded)
                         {
                             PrintGreen("Offline setup: done");
+                            OfferSteamToolsExePatch(patcher);
                             if (!OfferSteamRestart())
                                 WaitForKey();
                         }
@@ -191,6 +199,7 @@ namespace CloudFix
                         if (applyResult.Succeeded)
                         {
                             PrintGreen("Capcom Game Save Fix: enabled");
+                            OfferSteamToolsExePatch(patcher);
                             if (!OfferSteamRestart())
                                 WaitForKey();
                         }
@@ -202,6 +211,27 @@ namespace CloudFix
                         break;
 
                     case '3':
+                        if (anyPatched && stState == 1)
+                        {
+                            ClearScreen();
+                            PrintHeader();
+                            PrintLine($"Steam: {_steamPath}");
+                            PrintSep();
+                            Console.WriteLine();
+                            PrintLine("The SteamTools Desktop App overwrites DLL patches every time");
+                            PrintLine("it starts. This option patches SteamTools.exe to prevent that.");
+                            Console.WriteLine();
+                            Console.Write("  Continue? [Y/n] ");
+                            var stConfirm = Console.ReadKey(true);
+                            Console.WriteLine(stConfirm.KeyChar);
+                            Console.WriteLine();
+                            if (stConfirm.KeyChar is 'n' or 'N')
+                                break;
+                            KillSteamToolsIfRunning();
+                            patcher.PatchSteamToolsExe();
+                            Console.WriteLine();
+                            WaitForKey();
+                        }
                         break;
 
                     case '4':
@@ -406,11 +436,14 @@ namespace CloudFix
                 else
                 {
                     PrintYellow("SteamTools: unpatched");
-                    if (fallbackState == PatchState.Patched)
+                    bool anyPatched = offlineState == PatchState.Patched
+                        || cloudState == PatchState.Patched
+                        || fallbackState == PatchState.Patched;
+                    if (anyPatched)
                     {
-                        PrintYellow("Fallback is enabled but SteamTools Desktop App is unpatched.");
-                        PrintYellow("SteamTools Desktop App will overwrite Morrenus fallback every time");
-                        PrintYellow("you launch the desktop app unless you run option 4 and patch it!");
+                        PrintYellow("SteamTools patches are enabled but SteamTools Desktop App is unpatched.");
+                        PrintYellow("The SteamTools Desktop App will overwrite these patches unless you patch the app!");
+                        PrintYellow("Run Option 3 to patch the SteamTools app.");
                     }
                 }
             }
@@ -502,24 +535,7 @@ namespace CloudFix
             if (result.Succeeded)
             {
                 PrintGreen("Morrenus fallback: enabled");
-
-                var stState = patcher.GetSteamToolsExePatchState();
-                if (stState == 1)
-                {
-                    Console.WriteLine();
-                    PrintYellow("SteamTools Desktop is installed and will overwrite DLL patches on startup.");
-                    PrintLine("Would you like to disable its DLL deployment? (y/n)");
-                    PrintLine("IF YOU DON'T KNOW WHAT TO DO, PRESS Y");
-                    Console.Write("  > ");
-                    var answer = Console.ReadLine()?.Trim().ToLowerInvariant();
-                    if (answer == "" || answer == "y" || answer == "yes")
-                    {
-                        Console.WriteLine();
-                        KillSteamToolsIfRunning();
-                        patcher.PatchSteamToolsExe();
-                    }
-                }
-
+                OfferSteamToolsExePatch(patcher);
                 if (!OfferSteamRestart())
                     WaitForKey();
             }
@@ -911,6 +927,25 @@ namespace CloudFix
             "steam", "steamservice", "steamwebhelper",
             "SteamService", "GameOverlayUI",
         };
+
+        static void OfferSteamToolsExePatch(Patcher patcher)
+        {
+            var stState = patcher.GetSteamToolsExePatchState();
+            if (stState != 1) return; // not found, already patched, or unrecognized
+
+            Console.WriteLine();
+            PrintYellow("SteamTools Desktop is installed and will overwrite DLL patches on startup.");
+            PrintLine("Would you like to disable its DLL deployment? (y/n)");
+            PrintLine("IF YOU DON'T KNOW WHAT TO DO, PRESS Y");
+            Console.Write("  > ");
+            var answer = Console.ReadLine()?.Trim().ToLowerInvariant();
+            if (answer == "" || answer == "y" || answer == "yes")
+            {
+                Console.WriteLine();
+                KillSteamToolsIfRunning();
+                patcher.PatchSteamToolsExe();
+            }
+        }
 
         static bool OfferSteamRestart()
         {
