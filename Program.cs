@@ -406,9 +406,12 @@ namespace CloudFix
                 else
                 {
                     PrintYellow("SteamTools: unpatched");
-                    PrintYellow("Fallback is enabled but SteamTools Desktop App is unpatched.");
-                    PrintYellow("SteamTools Desktop App will overwrite Morrenus fallback every time");
-                    PrintYellow("you launch the desktop app unless you run option 4 and patch it!");
+                    if (fallbackState == PatchState.Patched)
+                    {
+                        PrintYellow("Fallback is enabled but SteamTools Desktop App is unpatched.");
+                        PrintYellow("SteamTools Desktop App will overwrite Morrenus fallback every time");
+                        PrintYellow("you launch the desktop app unless you run option 4 and patch it!");
+                    }
                 }
             }
 
