@@ -11,6 +11,7 @@ namespace CloudFix
         Patched,
         PartiallyPatched,
         UnknownVersion,
+        PayloadCorrupt,
         OutOfDate,
     }
 

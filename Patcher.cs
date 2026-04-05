@@ -112,6 +112,21 @@ namespace CloudFix
             _steamPath = steamPath;
         }
 
+        public bool DeletePayloadCache()
+        {
+            var cachePath = Fingerprint.FindCachePath(_steamPath, verbose: false);
+            if (cachePath == null)
+                return false;
+            try
+            {
+                File.Delete(cachePath);
+                _cachedPayload = null;
+                _cachedPayloadSize = 0;
+                return true;
+            }
+            catch (IOException) { return false; }
+        }
+
         static byte[] ReadFileShared(string path)
         {
             using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
@@ -221,7 +236,7 @@ namespace CloudFix
 
             var payload = GetDecryptedPayload(cachePath);
             if (payload == null)
-                return PatchState.UnknownVersion;
+                return PatchState.PayloadCorrupt;
 
             var resolved = ResolvePayloadPatchOffsets(payload);
             if (resolved == null)
@@ -249,7 +264,7 @@ namespace CloudFix
 
             var payload = GetDecryptedPayload(cachePath);
             if (payload == null)
-                return PatchState.UnknownVersion;
+                return PatchState.PayloadCorrupt;
 
             var resolved = ResolveSetupPatchOffsets(payload);
             if (resolved == null)
@@ -532,7 +547,7 @@ namespace CloudFix
 
             var payload = GetDecryptedPayload(cachePath);
             if (payload == null)
-                return PatchState.UnknownVersion;
+                return PatchState.PayloadCorrupt;
 
             var result = ResolveFallbackPatchOffsets(payload);
             if (result == null)

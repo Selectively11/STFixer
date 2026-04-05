@@ -339,7 +339,8 @@ namespace CloudFix
                 PatchState.Patched => "patched",
                 PatchState.OutOfDate => "out of date",
                 PatchState.PartiallyPatched => "partially patched",
-                PatchState.UnknownVersion => "unknown payload version",
+                PatchState.PayloadCorrupt => "payload corrupt",
+                PatchState.UnknownVersion => "unsupported payload version",
                 PatchState.NotInstalled => "payload not found",
                 _ => "unknown"
             };
@@ -359,7 +360,8 @@ namespace CloudFix
                 PatchState.Patched => "patched",
                 PatchState.OutOfDate => "out of date",
                 PatchState.PartiallyPatched => "partially patched",
-                PatchState.UnknownVersion => "unknown SteamTools version",
+                PatchState.PayloadCorrupt => "payload corrupt",
+                PatchState.UnknownVersion => "unsupported SteamTools version",
                 _ => "unknown"
             };
 
@@ -369,6 +371,19 @@ namespace CloudFix
                 PrintYellow($"Capcom Game Save Fix:  {cloudLabel}");
             else
                 PrintRed($"Capcom Game Save Fix:  {cloudLabel}");
+
+            // show guidance for payload issues
+            if (offlineState == PatchState.PayloadCorrupt || cloudState == PatchState.PayloadCorrupt)
+            {
+                PrintRed("  Payload cache is corrupt. Run option 4 to re-download DLLs and reset the payload.");
+                return;
+            }
+            if (offlineState == PatchState.UnknownVersion || cloudState == PatchState.UnknownVersion)
+            {
+                PrintRed("  Payload version is not recognized by this version of STFixer.");
+                PrintRed("  Run option 4 to re-download DLLs and reset the payload, then restart Steam.");
+                return;
+            }
 
             if (cloudState == PatchState.NotInstalled)
             {
@@ -424,7 +439,25 @@ namespace CloudFix
             var result = patcher.RepairDlls();
             Console.WriteLine();
             if (result.Succeeded)
+            {
                 PrintGreen("DLLs repaired successfully.");
+
+                // if the payload is unrecognized, delete it so Steam fetches a fresh one
+                var offState = patcher.GetOfflinePatchState();
+                var cloudState = patcher.GetPatchState();
+                if (offState == PatchState.PayloadCorrupt || offState == PatchState.UnknownVersion
+                    || cloudState == PatchState.PayloadCorrupt || cloudState == PatchState.UnknownVersion)
+                {
+                    Console.WriteLine();
+                    if (patcher.DeletePayloadCache())
+                    {
+                        PrintYellow("Payload cache was unrecognized and has been deleted.");
+                        PrintLine("Restart Steam so that SteamTools can download a fresh payload.");
+                    }
+                    else
+                        PrintYellow("Could not delete payload cache. Try deleting the appcache/httpcache folder manually.");
+                }
+            }
             else
                 PrintRed($"Repair failed: {result.Error}");
 
