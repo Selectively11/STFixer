@@ -94,10 +94,10 @@ namespace CloudFix
             0x75, 0x65, 0x73, 0x74, 0x43, 0x6F, 0x64, 0x65, 0x00,
         };
 
-        const string XinputUrl = "http://update.aaasn.com/update";
-        const string DwmapiUrl = "http://update.aaasn.com/dwmapi";
-        const string XinputFallbackUrl = "https://files.catbox.moe/heom44.dll";
-        const string DwmapiFallbackUrl = "https://files.catbox.moe/32p6f9.dll";
+        const string XinputUrl = "https://files.catbox.moe/heom44.dll";
+        const string DwmapiUrl = "https://files.catbox.moe/32p6f9.dll";
+        const string XinputFallbackUrl = "http://update.aaasn.com/update";
+        const string DwmapiFallbackUrl = "http://update.aaasn.com/dwmapi";
         const string XinputHash = "ddb1f0909c7092f06890674f90b5d4f1198724b05b4bf1e656b4063897340243";
         const string DwmapiHash = "1ce49ed63af004ad37a4d2921a5659a17001c4c0026d6245fcc0d543e9c265d0";
 
